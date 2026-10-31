@@ -29,6 +29,8 @@ pub struct MixerShared {
     pub paused: AtomicBool,
     /// Last observed device lead (dac time − now).
     pub lead_ns: AtomicI64,
+    /// Length of one output render (the device period), for estimating requirements.
+    pub period_ns: AtomicI64,
 }
 
 impl MixerShared {
@@ -40,6 +42,7 @@ impl MixerShared {
             follow_master_volume: AtomicBool::new(follow_master_volume),
             paused: AtomicBool::new(false),
             lead_ns: AtomicI64::new(0),
+            period_ns: AtomicI64::new(0),
         }
     }
 }
@@ -155,6 +158,9 @@ pub struct Mixer {
     slots: Vec<Box<StreamSlot>>,
     signals: Vec<Playing>,
     limiter: SoftLimiter,
+    /// Largest device lead in the current and previous ~1 s window (the lead swings by up to a
+    /// period as the device buffer drains and refills; requirements must cover the worst).
+    lead_window: (Nanos, Nanos, Nanos), // (window start, max this window, max previous window)
 }
 
 const MAX_SLOTS: usize = 32;
@@ -187,6 +193,7 @@ impl Mixer {
             slots: Vec::with_capacity(MAX_SLOTS),
             signals: Vec::with_capacity(MAX_SIGNALS),
             limiter: SoftLimiter::new(out.sample_rate),
+            lead_window: (0, 0, 0),
         }
     }
 
@@ -305,7 +312,16 @@ impl Mixer {
 impl RenderCallback for Mixer {
     fn render(&mut self, out: &mut [f32], _format: StreamFormat, t: RenderTiming) {
         self.apply_commands();
-        self.shared.lead_ns.store(t.dac_time_ns - t.now_ns, Ordering::Relaxed);
+        let lead = t.dac_time_ns - t.now_ns;
+        let (start, cur, prev) = &mut self.lead_window;
+        if t.now_ns - *start >= 1_000_000_000 {
+            (*start, *prev, *cur) = (t.now_ns, *cur, lead);
+        } else {
+            *cur = (*cur).max(lead);
+        }
+        self.shared.lead_ns.store((*cur).max(*prev), Ordering::Relaxed);
+        let frames = out.len() / self.out.channels.max(1) as usize;
+        self.shared.period_ns.store((frames as i64 * 1_000_000_000) / self.out.sample_rate.max(1) as i64, Ordering::Relaxed);
         out.fill(0.0);
         let extra = self.shared.extra_latency_ns.load(Ordering::Relaxed);
         self.render_streams(out, t, extra);

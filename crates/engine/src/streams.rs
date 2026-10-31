@@ -28,7 +28,10 @@ const STREAM_RING: usize = 512;
 const SLOW_TICK_NS: Nanos = 1_000_000_000;
 const FAST_TICK_NS: Nanos = 250_000_000;
 const REQUIRED_GUARD_NS: Nanos = 2_000_000;
-const FALLBACK_HEADROOM_NS: Nanos = 10_000_000;
+/// Before a receiver has measured anything, its estimate adds this to its device lead and period:
+/// the master's capture period (~10 ms), one packet (~4 ms), the network, the resampler lookahead
+/// and the guard.
+const FALLBACK_HEADROOM_NS: Nanos = 20_000_000;
 const DEFAULT_FORMAT: StreamFormat = StreamFormat { sample_rate: 48_000, channels: 2, channel_mask: 0x3 };
 const ECHO_GUARD: &str = "Remote streams muted here: this PC is capturing its own output device (echo guard)";
 const VBCABLE_MISSING: &str = "VB-CABLE (CABLE Input) not found — install it or switch to Direct mode";
@@ -353,8 +356,11 @@ impl Node {
         match measured {
             Some(v) => v + REQUIRED_GUARD_NS,
             None => {
+                // Not measured yet: the same parts a measurement has (the device's worst lead and
+                // one period; the headroom stands in for capture, packet, network and lookahead).
                 let lead = self.media.mixer.lead_ns.load(Ordering::Relaxed).max(0);
-                lead + self.config.extra_latency_ns() + FALLBACK_HEADROOM_NS
+                let period = self.media.mixer.period_ns.load(Ordering::Relaxed).max(0);
+                lead + period + self.config.extra_latency_ns() + FALLBACK_HEADROOM_NS
             }
         }
     }

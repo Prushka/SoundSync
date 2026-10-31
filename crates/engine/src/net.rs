@@ -196,6 +196,9 @@ pub fn spawn_rx(
             // the receive (on Windows an oversized datagram is an error, WSAEMSGSIZE).
             let mut buf = vec![0u8; 65_536];
             let mut last_error_log: Option<std::time::Instant> = None;
+            // set_read_timeout is a setsockopt call: only make it when the timeout changes (the
+            // socket was created with READ_TIMEOUT), not once per packet.
+            let mut current_timeout = READ_TIMEOUT;
             loop {
                 for cmd in routes.try_iter() {
                     match cmd {
@@ -217,7 +220,9 @@ pub fn spawn_rx(
                     Some(d) => Duration::from_nanos((d.due - now).clamp(100_000, 50_000_000) as u64),
                     None => READ_TIMEOUT,
                 };
-                let _ = transport.socket.set_read_timeout(Some(timeout));
+                if timeout != current_timeout && transport.socket.set_read_timeout(Some(timeout)).is_ok() {
+                    current_timeout = timeout;
+                }
                 match transport.socket.recv_from(&mut buf) {
                     Ok((n, from)) => {
                         let arrival = rx.host.now_ns();
