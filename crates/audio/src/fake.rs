@@ -491,15 +491,26 @@ mod tests {
         StreamFormat { sample_rate: 48_000, channels: 2, channel_mask: 3 }
     }
 
-    struct Rec(Arc<Mutex<Vec<(RenderTiming, usize)>>>);
+    /// Records timings; blocks 50 ms on call number `.1` (a scheduling stall).
+    struct Rec(Arc<Mutex<Vec<(RenderTiming, usize)>>>, Option<usize>);
     impl RenderCallback for Rec {
         fn render(&mut self, out: &mut [f32], format: StreamFormat, t: RenderTiming) {
-            self.0.lock().unwrap().push((t, out.len() / format.channels as usize));
+            let calls = {
+                let mut g = self.0.lock().unwrap();
+                g.push((t, out.len() / format.channels as usize));
+                g.len()
+            };
+            if Some(calls) == self.1 {
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
     }
 
     #[test]
     fn fake_output_dac_times_follow_device_rate() {
+        // The callback blocks 50 ms once (what an oversleeping CI machine does): the device
+        // underruns and skips ahead, and between contiguous callbacks the DAC times still
+        // advance at the device's own rate (100 ppm fast), not the nominal one.
         let host = FakeHost::new(FakeClock::default());
         host.add_output(FakeOutputSpec {
             name: "TV".into(),
@@ -510,25 +521,32 @@ mod tests {
             period_ns: 10_000_000,
         });
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let stream = host.open_output(&DeviceSelector::Name("TV".into()), OutputOptions::default(), Box::new(Rec(calls.clone()))).unwrap();
+        let stream = host
+            .open_output(&DeviceSelector::Name("TV".into()), OutputOptions::default(), Box::new(Rec(calls.clone(), Some(20))))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(1300));
         drop(stream);
         let calls = calls.lock().unwrap();
-        let (first, _) = calls[0];
-        let mut frames = 0usize;
-        let mut last = first;
-        for &(t, n) in calls.iter() {
-            if frames >= 48_000 {
-                break;
+        let dev_rate = 48_000.0 * (1.0 + 100e-6);
+        let (mut span, mut frames, mut skips) = (0.0f64, 0usize, 0);
+        for w in calls.windows(2) {
+            let (dt, n) = ((w[1].0.dac_time_ns - w[0].0.dac_time_ns) as f64, w[0].1);
+            let residual = dt - n as f64 * 1e9 / dev_rate;
+            assert!(residual > -1_000.0, "DAC time went backwards relative to the frames written: {residual} ns");
+            if residual > 1_000.0 {
+                skips += 1; // an underrun: the device moved on without us
+            } else {
+                span += dt;
+                frames += n;
             }
-            last = t;
-            frames += n;
         }
-        // dac time of frame `frames_before_last` relative to frame 0
-        let frames_before_last: usize = calls.iter().take_while(|(t, _)| *t != last).map(|(_, n)| n).sum();
-        let want = frames_before_last as f64 * 1e9 / (48_000.0 * (1.0 + 100e-6));
-        let got = (last.dac_time_ns - first.dac_time_ns) as f64;
-        assert!((got - want).abs() < 100_000.0, "dac span {got} vs {want}");
+        assert!(skips >= 1, "the stall must have caused an underrun");
+        assert!(frames >= 30_000, "frames {frames}");
+        let at_device_rate = frames as f64 * 1e9 / dev_rate;
+        let at_nominal_rate = frames as f64 * 1e9 / 48_000.0;
+        assert!((span - at_device_rate).abs() < 2_000.0, "span {span} vs {at_device_rate} at the device rate");
+        assert!((span - at_nominal_rate).abs() > 40_000.0, "the 100 ppm must show: span {span} vs {at_nominal_rate}");
+        let (first, _) = calls[0];
         let lead = first.dac_time_ns - first.now_ns;
         assert!((15_000_000..=40_000_000).contains(&lead), "lead {lead} includes reported latency");
     }
@@ -588,7 +606,7 @@ mod tests {
         let seen = events.clone();
         let watch = host.watch(Box::new(move |e| seen.lock().unwrap().push(e))).unwrap();
         let tv = DeviceSelector::Name("TV".into());
-        let stream = host.open_output(&tv, OutputOptions::default(), Box::new(Rec(Arc::default()))).unwrap();
+        let stream = host.open_output(&tv, OutputOptions::default(), Box::new(Rec(Arc::default(), None))).unwrap();
         assert!(stream.is_alive());
         host.remove_device("TV");
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -597,10 +615,10 @@ mod tests {
         }
         assert!(!stream.is_alive(), "a stream on a removed device dies");
         assert!(host.devices(Direction::Render).unwrap().is_empty());
-        assert!(matches!(host.open_output(&tv, OutputOptions::default(), Box::new(Rec(Arc::default()))), Err(AudioError::NotFound(_))));
+        assert!(matches!(host.open_output(&tv, OutputOptions::default(), Box::new(Rec(Arc::default(), None))), Err(AudioError::NotFound(_))));
         host.readd_device("TV");
         assert_eq!(host.devices(Direction::Render).unwrap().len(), 1);
-        assert!(host.open_output(&tv, OutputOptions::default(), Box::new(Rec(Arc::default()))).unwrap().is_alive());
+        assert!(host.open_output(&tv, OutputOptions::default(), Box::new(Rec(Arc::default(), None))).unwrap().is_alive());
         assert_eq!(*events.lock().unwrap(), vec![DeviceEvent::Removed("fake:TV".into()), DeviceEvent::Added("fake:TV".into())]);
         drop(watch);
         host.remove_device("TV");
@@ -646,6 +664,6 @@ mod tests {
         assert!(host.devices(Direction::Capture).unwrap().is_empty());
         host.set_active_sessions("CABLE Input", 2);
         assert_eq!(host.active_sessions(&DeviceSelector::Name("CABLE Input".into())).unwrap(), 2);
-        assert!(matches!(host.open_output(&DeviceSelector::Name("nope".into()), OutputOptions::default(), Box::new(Rec(Arc::default()))), Err(AudioError::NotFound(_))));
+        assert!(matches!(host.open_output(&DeviceSelector::Name("nope".into()), OutputOptions::default(), Box::new(Rec(Arc::default(), None))), Err(AudioError::NotFound(_))));
     }
 }

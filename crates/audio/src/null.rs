@@ -111,6 +111,9 @@ pub fn open_null_output(now: Arc<dyn Fn() -> Nanos + Send + Sync>, format: Strea
         while !stop.load(Ordering::Acquire) {
             let t = now();
             let elapsed = ((t - start) as i128 * rate as i128 / 1_000_000_000) as i64;
+            if elapsed > written {
+                written = elapsed; // stalled past the buffer: an underrun, like a real device
+            }
             let target = elapsed + period;
             if target > written {
                 let n = ((target - written) as usize).min(max_frames);
@@ -130,29 +133,40 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    struct Count(Arc<Mutex<(usize, Vec<RenderTiming>)>>);
+    /// Counts frames and timings; blocks 50 ms on call number `.1` (a scheduling stall).
+    struct Count(Arc<Mutex<(usize, Vec<RenderTiming>)>>, Option<usize>);
     impl RenderCallback for Count {
         fn render(&mut self, out: &mut [f32], format: StreamFormat, t: RenderTiming) {
-            let mut g = self.0.lock().unwrap();
-            g.0 += out.len() / format.channels as usize;
-            g.1.push(t);
+            let calls = {
+                let mut g = self.0.lock().unwrap();
+                g.0 += out.len() / format.channels as usize;
+                g.1.push(t);
+                g.1.len()
+            };
+            if Some(calls) == self.1 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
     }
 
     #[test]
     fn null_output_calls_back_at_real_time_rate() {
+        // CI machines oversleep; a stalled render (here: the callback blocks 50 ms once) must
+        // skip ahead like a real device's underrun, never report a DAC time in the past.
         let seen = Arc::new(Mutex::new((0usize, Vec::new())));
         let start = std::time::Instant::now();
         let now: Arc<dyn Fn() -> Nanos + Send + Sync> = Arc::new(move || start.elapsed().as_nanos() as Nanos + 1_000_000_000);
         let fmt = StreamFormat { sample_rate: 48_000, channels: 2, channel_mask: 3 };
-        let stream = open_null_output(now, fmt, Box::new(Count(seen.clone())));
+        let stream = open_null_output(now, fmt, Box::new(Count(seen.clone(), Some(10))));
         std::thread::sleep(std::time::Duration::from_millis(1000));
         drop(stream);
         let g = seen.lock().unwrap();
-        // One period is buffered ahead, so up to 10 ms extra.
-        assert!((47_000..=50_000).contains(&g.0), "frames {}", g.0);
-        let lead = g.1.last().map(|t| t.dac_time_ns - t.now_ns).unwrap();
-        assert!((0..=20_000_000).contains(&lead), "lead {lead}");
+        assert!(g.0 <= 50_000, "never renders ahead of real time: {} frames", g.0);
+        assert!(g.0 >= 30_000, "frames {}", g.0);
+        for t in &g.1 {
+            let lead = t.dac_time_ns - t.now_ns;
+            assert!((0..=20_000_000).contains(&lead), "lead {lead}");
+        }
         assert!(g.1.windows(2).all(|w| w[1].dac_time_ns > w[0].dac_time_ns));
     }
 }
