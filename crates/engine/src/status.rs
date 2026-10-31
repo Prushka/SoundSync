@@ -46,7 +46,8 @@ pub enum CalibStatus {
     #[default]
     Idle,
     Running { step: usize, total: usize },
-    Done { session: u32, deltas: Vec<(NodeId, Nanos)> },
+    /// Per-device corrections (or, for a check run, what is left) with their quality.
+    Done { session: u32, results: Vec<soundsync_core::calib::CalibResult>, check: bool },
     Failed(String),
 }
 

@@ -59,10 +59,18 @@ fn calibration_recovers_hidden_latencies() {
     let room = FakeRoom::new(48_000);
     let nodes = room_setup(&room);
     let mic_node = id(&nodes[0]);
-    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into() });
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: false });
     assert!(wait_until(Duration::from_secs(4), || matches!(nodes[1].engine.status().calibration, CalibStatus::Running { .. })
         || nodes[1].engine.status().streams_paused));
-    assert!(wait_until(Duration::from_secs(10), || matches!(nodes[0].engine.status().calibration, CalibStatus::Done { .. })), "{:?}", nodes[0].engine.status().calibration);
+    assert!(wait_until(Duration::from_secs(16), || matches!(nodes[0].engine.status().calibration, CalibStatus::Done { .. })), "{:?}", nodes[0].engine.status().calibration);
+    // Three sweeps per device, all heard clearly and consistently.
+    let CalibStatus::Done { results, check, .. } = nodes[0].engine.status().calibration.clone() else { unreachable!() };
+    assert!(!check);
+    assert_eq!(results.len(), 3);
+    for r in &results {
+        assert_eq!((r.heard, r.sweeps), (3, 3), "{r:?}");
+        assert!(r.snr_db >= 30.0 && r.spread_ns < 500_000 && r.problems().is_empty(), "{r:?}");
+    }
     nodes[0].engine.command(Command::ApplyCalibration);
     assert!(wait_until(Duration::from_secs(3), || extra_of(&nodes[2]) != 0 && extra_of(&nodes[0]) != 0));
     sleep(Duration::from_millis(300));
@@ -74,6 +82,15 @@ fn calibration_recovers_hidden_latencies() {
         }
     }
     assert!(nodes.iter().all(|n| !n.engine.status().streams_paused));
+    // A quick check (one sweep each) measures what is left: nothing worth correcting.
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: true });
+    assert!(wait_until(Duration::from_secs(10), || matches!(nodes[0].engine.status().calibration, CalibStatus::Done { check: true, .. })), "{:?}", nodes[0].engine.status().calibration);
+    let CalibStatus::Done { results, .. } = nodes[0].engine.status().calibration.clone() else { unreachable!() };
+    for r in &results {
+        assert_eq!(r.sweeps, 1);
+        assert!(r.delta_ns.abs() <= 500_000, "left over after calibration: {r:?}");
+    }
+    assert!(wait_until(Duration::from_secs(3), || nodes.iter().all(|n| !n.engine.status().streams_paused)));
     // With the calibrated offsets every speaker now sounds together (all h_ref = 35 ms late).
     let t0 = now();
     nodes[0].engine.command(Command::SetBroadcast(true));
@@ -91,8 +108,8 @@ fn calibration_fails_cleanly_without_signal() {
     let nodes = room_setup(&room);
     nodes[2].engine.command(Command::SetVolume(0.0));
     let mic_node = id(&nodes[0]);
-    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into() });
-    assert!(wait_until(Duration::from_secs(10), || matches!(nodes[0].engine.status().calibration, CalibStatus::Failed(_))));
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: false });
+    assert!(wait_until(Duration::from_secs(16), || matches!(nodes[0].engine.status().calibration, CalibStatus::Failed(_))));
     match &nodes[0].engine.status().calibration {
         CalibStatus::Failed(msg) => assert!(msg.contains("no signal from n2"), "{msg}"),
         other => panic!("{other:?}"),
@@ -108,8 +125,8 @@ fn remote_mic_node_runs_calibration() {
     let room = FakeRoom::new(48_000);
     let nodes = room_setup(&room);
     let mic_node = id(&nodes[0]);
-    nodes[2].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into() });
-    assert!(wait_until(Duration::from_secs(12), || matches!(nodes[2].engine.status().calibration, CalibStatus::Done { .. })), "{:?}", nodes[2].engine.status().calibration);
+    nodes[2].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: false });
+    assert!(wait_until(Duration::from_secs(18), || matches!(nodes[2].engine.status().calibration, CalibStatus::Done { .. })), "{:?}", nodes[2].engine.status().calibration);
     for n in nodes.into_iter().rev() {
         n.shutdown();
     }

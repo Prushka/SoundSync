@@ -14,6 +14,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::calib::CalibResult;
 use crate::types::{MasterMode, Nanos, NodeId, Os, Role, StreamFormat};
 
 pub const MAGIC: [u8; 4] = *b"SSYN";
@@ -135,11 +136,12 @@ pub enum CalibSignal {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CalibMsg {
-    Request { mic_device: String },
+    /// `check`: one sweep per device, to measure what is left after applying corrections.
+    Request { mic_device: String, check: bool },
     Begin { session: u32, until_ns: Nanos },
     Play { session: u32, at_ns: Nanos, signal: CalibSignal },
     End { session: u32 },
-    Result { session: u32, deltas: Vec<(NodeId, Nanos)>, error: Option<String> },
+    Result { session: u32, results: Vec<CalibResult>, check: bool, error: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -343,6 +345,7 @@ fn control_ok(c: &Control) -> bool {
             s.stream.as_ref().is_none_or(|i| i.format.is_valid() && i.presentation_offset_ns.abs() <= MAX_OFFSET_NS)
                 && s.output.as_ref().is_none_or(|o| o.format.is_valid())
         }
+        Control::Calib(CalibMsg::Result { results, .. }) => results.iter().all(|r| !r.snr_db.is_nan() && r.heard <= r.sweeps),
         _ => true,
     }
 }
@@ -479,14 +482,18 @@ mod tests {
             Control::Subscribe { stream_id: 5 },
             Control::Unsubscribe { stream_id: 6 },
             Control::SetOffset { target: 42, extra_latency_ns: 25_000_000 },
-            Control::Calib(CalibMsg::Request { mic_device: "Microphone".into() }),
+            Control::Calib(CalibMsg::Request { mic_device: "Microphone".into(), check: true }),
             Control::Calib(CalibMsg::Begin { session: 1, until_ns: 10 }),
             Control::Calib(CalibMsg::Play { session: 1, at_ns: 11, signal: CalibSignal::Sweep }),
             Control::Calib(CalibMsg::Play { session: 1, at_ns: 12, signal: CalibSignal::Click { freq_hz: 800 } }),
             Control::Calib(CalibMsg::End { session: 1 }),
             Control::Calib(CalibMsg::Result {
                 session: 1,
-                deltas: vec![(1, -35_000_000), (2, 145_000_000)],
+                results: vec![
+                    CalibResult { node: 1, delta_ns: -35_000_000, snr_db: 41.5, spread_ns: 120_000, heard: 3, sweeps: 3 },
+                    CalibResult { node: 2, delta_ns: 145_000_000, snr_db: 27.0, spread_ns: 0, heard: 1, sweeps: 3 },
+                ],
+                check: false,
                 error: Some("no signal from TV".into()),
             }),
             Control::SyncTest { active: true, epoch_ns: 1_000 },

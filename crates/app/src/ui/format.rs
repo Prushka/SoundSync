@@ -20,6 +20,25 @@ pub fn sync_label(s: &StreamStatus) -> String {
     }
 }
 
+/// A measurement's signal-to-noise for display.
+pub fn fmt_snr(db: f32) -> String {
+    if db > 60.0 { "> 60 dB".into() } else { format!("{db:.0} dB") }
+}
+
+/// Note for one device's calibration result and whether it looks good. A check run (`check`)
+/// shows what is left, which is fine within the 1 ms people notice.
+pub fn calib_note(r: &soundsync_core::calib::CalibResult, check: bool) -> (String, bool) {
+    let mut notes = Vec::new();
+    if check && r.delta_ns.abs() > 1_000_000 {
+        notes.push(format!("off by {:.1} ms (Apply corrects it)", r.delta_ns.abs() as f64 / 1e6));
+    }
+    notes.extend(r.problems());
+    if notes.is_empty() {
+        return ((if check { "✓ in sync" } else { "✓" }).into(), true);
+    }
+    (notes.join("; "), false)
+}
+
 pub fn role_label(r: Role) -> &'static str {
     match r {
         Role::Receiver => "Listener",
@@ -44,6 +63,30 @@ pub fn tray_status_line(st: &Status) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn result(delta_ms: f64, snr_db: f32, spread_ms: f64, heard: u8, sweeps: u8) -> soundsync_core::calib::CalibResult {
+        soundsync_core::calib::CalibResult {
+            node: 1,
+            delta_ns: (delta_ms * 1e6) as Nanos,
+            snr_db,
+            spread_ns: (spread_ms * 1e6) as Nanos,
+            heard,
+            sweeps,
+        }
+    }
+
+    #[test]
+    fn calibration_result_labels() {
+        assert_eq!(fmt_snr(41.6), "42 dB");
+        assert_eq!(fmt_snr(f32::INFINITY), "> 60 dB");
+        // Calibration: corrections with their doubts.
+        assert_eq!(calib_note(&result(12.0, 41.0, 0.1, 3, 3), false), ("✓".to_string(), true));
+        assert_eq!(calib_note(&result(12.0, 24.0, 2.0, 2, 3), false), ("heard 2 of 3 sweeps; sweeps disagree by 2.0 ms; weak signal (24 dB)".to_string(), false));
+        // Check run: what is left.
+        assert_eq!(calib_note(&result(0.4, 40.0, 0.0, 1, 1), true), ("✓ in sync".to_string(), true));
+        assert_eq!(calib_note(&result(-2.5, 40.0, 0.0, 1, 1), true), ("off by 2.5 ms (Apply corrects it)".to_string(), false));
+        assert_eq!(calib_note(&result(-2.5, 22.0, 0.0, 1, 1), true), ("off by 2.5 ms (Apply corrects it); weak signal (22 dB)".to_string(), false));
+    }
     use soundsync_core::player::PlayState;
     use soundsync_core::protocol::RxStat;
     use soundsync_core::{MasterMode, Os, StreamFormat};

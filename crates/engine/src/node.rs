@@ -289,11 +289,11 @@ impl Node {
         }
         match c {
             Command::SyncTest(on) => self.sync_test_command(on),
-            Command::StartCalibration { mic_node, mic_device } => {
+            Command::StartCalibration { mic_node, mic_device, check } => {
                 if mic_node == self.id() {
-                    self.start_calibration(&mic_device);
+                    self.start_calibration(&mic_device, check);
                 } else if let Some(p) = self.peers.get(mic_node) {
-                    self.send(p.addr, &Control::Calib(soundsync_core::protocol::CalibMsg::Request { mic_device }));
+                    self.send(p.addr, &Control::Calib(soundsync_core::protocol::CalibMsg::Request { mic_device, check }));
                     self.calib.status = crate::status::CalibStatus::Running { step: 0, total: self.peers.len() + 1 };
                 } else {
                     self.warn("calibration: the chosen microphone node is not connected");

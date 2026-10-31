@@ -266,7 +266,7 @@ fn sync(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
 
 fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
     ui.heading("Auto-calibrate with a microphone");
-    ui.label("Place a microphone where you listen. Each speaker plays a short sweep in turn; SoundSync measures when each one arrives and corrects the extra latencies. Avoid Bluetooth headset microphones.");
+    ui.label("Place a microphone where you listen. The speakers take turns playing a short sweep, three times each; SoundSync measures when each one arrives and corrects the extra latencies. Check measures what is left afterwards. Avoid Bluetooth headset microphones.");
     let mic_node = app.drafts.mic_node.unwrap_or(st.node_id);
     egui::Grid::new("calib").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Microphone on");
@@ -295,31 +295,59 @@ fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
     });
     ui.horizontal(|ui| {
         let running = matches!(st.calibration, CalibStatus::Running { .. });
-        if ui.add_enabled(!running, egui::Button::new("Start")).clicked() {
-            app.command(Command::StartCalibration { mic_node, mic_device: app.drafts.mic_device.clone() });
+        let mic_device = app.drafts.mic_device.clone();
+        if ui
+            .add_enabled(!running, egui::Button::new("Start"))
+            .on_hover_text("Three sweeps per speaker; corrections are shown before you apply them")
+            .clicked()
+        {
+            app.command(Command::StartCalibration { mic_node, mic_device: mic_device.clone(), check: false });
+        }
+        if ui
+            .add_enabled(!running, egui::Button::new("Check"))
+            .on_hover_text("One quick sweep per speaker: measures how far each one is still off")
+            .clicked()
+        {
+            app.command(Command::StartCalibration { mic_node, mic_device, check: true });
         }
         if ui.add_enabled(running, egui::Button::new("Cancel")).clicked() {
             app.command(Command::CancelCalibration);
         }
-        if matches!(st.calibration, CalibStatus::Done { .. }) && ui.button("Apply").clicked() {
-            app.command(Command::ApplyCalibration);
+        if let CalibStatus::Done { check, .. } = &st.calibration {
+            let label = if *check { "Correct these" } else { "Apply" };
+            if ui.button(label).clicked() {
+                app.command(Command::ApplyCalibration);
+                app.notice = Some("Corrections applied. Run Check to measure what is left.".into());
+            }
         }
     });
     match &st.calibration {
         CalibStatus::Idle => {}
         CalibStatus::Running { step, total } => {
-            ui.add(egui::ProgressBar::new(*step as f32 / (*total).max(1) as f32).text(format!("measuring speaker {} of {total}…", (*step + 1).min(*total))));
+            ui.add(egui::ProgressBar::new(*step as f32 / (*total).max(1) as f32).text(format!("sweep {} of {total}…", (*step + 1).min(*total))));
         }
         CalibStatus::Failed(msg) => {
             ui.label(RichText::new(format!("Calibration failed: {msg}")).color(WARN));
         }
-        CalibStatus::Done { deltas, .. } => {
-            ui.label("Measured corrections (Apply adds them to the extra latencies):");
-            egui::Grid::new("calib_result").striped(true).show(ui, |ui| {
-                for (node, delta) in deltas {
-                    let name = if *node == st.node_id { st.name.clone() } else { st.peers.iter().find(|p| p.id == *node).map_or("?".into(), |p| p.name.clone()) };
+        CalibStatus::Done { results, check, .. } => {
+            ui.label(if *check {
+                "Left over (one sweep each; within 1 ms is in sync):"
+            } else {
+                "Measured corrections (Apply adds them to the extra latencies):"
+            });
+            egui::Grid::new("calib_result").striped(true).num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
+                ui.label(RichText::new("Speaker").strong());
+                ui.label(RichText::new(if *check { "Off by" } else { "Correction" }).strong());
+                ui.label(RichText::new("Signal").strong());
+                ui.label(RichText::new("").strong());
+                ui.end_row();
+                for r in results {
+                    let name = if r.node == st.node_id { st.name.clone() } else { st.peers.iter().find(|p| p.id == r.node).map_or("?".into(), |p| p.name.clone()) };
                     ui.label(name);
-                    ui.label(format!("{:+.1} ms", *delta as f64 / 1e6));
+                    ui.label(format!("{:+.1} ms", r.delta_ns as f64 / 1e6));
+                    ui.label(super::format::fmt_snr(r.snr_db));
+                    let (note, ok) = super::format::calib_note(r, *check);
+                    ui.label(if ok { RichText::new(note) } else { RichText::new(format!("⚠ {note}")).color(WARN) });
                     ui.end_row();
                 }
             });

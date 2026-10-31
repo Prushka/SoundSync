@@ -19,7 +19,8 @@ pub enum Command {
     SetDelay(DelaySetting),
     SetSwitchDefault(bool),
     SyncTest(bool),
-    StartCalibration { mic_node: NodeId, mic_device: String },
+    /// `check`: a quick run (one sweep per device) that only measures what is left.
+    StartCalibration { mic_node: NodeId, mic_device: String, check: bool },
     ApplyCalibration,
     CancelCalibration,
 }

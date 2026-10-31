@@ -190,9 +190,15 @@ the **Overview** group table.
 - **Sync test** (Sync tab): every speaker clicks once a second at the same moment, each at its own pitch.
   Adjust the extra latencies until the clicks sound like one. A speaker that clicks late needs a larger value.
 - **Auto-calibrate with a microphone** (Sync tab): choose a device with a microphone and place it where you
-  listen. Each speaker plays a short sweep in turn; SoundSync measures when each one arrives and shows the
-  corrections. **Apply** adds them to the extra latencies. Use a built-in or USB microphone: Bluetooth headset
-  microphones change the headset's own latency while they are in use.
+  listen (speakers are aligned for that spot; sound travels about 34 cm per millisecond). **Start**: the
+  speakers take turns playing a short sweep, three times each. SoundSync finds when each sweep arrived (the
+  earliest strong arrival, so a louder reflection off a wall does not count), takes each speaker's median and
+  shows the corrections with each speaker's signal strength. A speaker is flagged when its sweeps disagree by
+  more than 1 ms, when one was not heard, or when the signal is weak (below 30 dB). **Apply** adds the
+  corrections to the extra latencies; **Check** then plays one sweep per speaker and shows what is left
+  (within 1 ms is in sync). The microphone's own delay cancels out, since every speaker is measured through it.
+  Use a built-in or USB microphone: Bluetooth headset microphones change the headset's own latency while they
+  are in use.
 
 Bluetooth delays drift a little between connections. Rerun the calibration if a Bluetooth speaker sounds out
 of sync after reconnecting.
