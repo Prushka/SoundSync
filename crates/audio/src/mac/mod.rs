@@ -17,11 +17,12 @@ use objc2_core_audio_types::AudioTimeStampFlags;
 use soundsync_core::timeline::FrameClock;
 
 use crate::{
-    AudioError, AudioHost, CaptureInfo, CaptureSink, DeviceEvent, DeviceInfo, DeviceSelector, Direction, LoopbackOptions, Nanos,
+    AudioError, AudioHost, CaptureInfo, CaptureSink, DeviceEvent, DeviceInfo, DeviceSelector, Direction, EndpointVolume, LoopbackOptions, Nanos,
     OutputOptions, RenderCallback, RenderTiming, Stream, StreamFormat, StreamHandle, select_device,
 };
 
 const RECEIVE_ONLY: &str = "receive-only on macOS";
+const NO_VOLUME: &str = "this output has no volume control";
 
 fn err(e: impl std::fmt::Display) -> AudioError {
     AudioError::Os(e.to_string())
@@ -187,8 +188,19 @@ impl AudioHost for MacHost {
         Err(AudioError::Unsupported(RECEIVE_ONLY))
     }
 
-    fn endpoint_volume(&self, _sel: &DeviceSelector) -> Result<(f32, bool), AudioError> {
-        Err(AudioError::Unsupported(RECEIVE_ONLY))
+    fn endpoint_volume(&self, sel: &DeviceSelector) -> Result<EndpointVolume, AudioError> {
+        let (_, id) = Self::resolve(Direction::Render, sel)?;
+        props::volume(id).ok_or(AudioError::Unsupported(NO_VOLUME))
+    }
+
+    fn set_endpoint_volume(&self, sel: &DeviceSelector, scalar: f32) -> Result<(), AudioError> {
+        let (_, id) = Self::resolve(Direction::Render, sel)?;
+        props::set_volume(id, scalar.clamp(0.0, 1.0)).then_some(()).ok_or(AudioError::Unsupported(NO_VOLUME))
+    }
+
+    fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {
+        let (_, id) = Self::resolve(Direction::Render, sel)?;
+        props::set_mute(id, muted).then_some(()).ok_or(AudioError::Unsupported(NO_VOLUME))
     }
 
     fn active_sessions(&self, _sel: &DeviceSelector) -> Result<usize, AudioError> {

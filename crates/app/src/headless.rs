@@ -159,6 +159,7 @@ mod tests {
                 behind_ns: 0,
                 lost_frames: 3,
                 layout_warning: None,
+                master_volume: 1.0,
             }],
             ..Status::default()
         };

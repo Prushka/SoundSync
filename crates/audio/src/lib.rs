@@ -121,6 +121,22 @@ pub enum AudioError {
     Os(String),
 }
 
+/// A device's own (OS) volume: the slider position, its level in dB, and mute.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EndpointVolume {
+    /// Slider position, 0..=1 (the OS maps it to a loudness curve).
+    pub scalar: f32,
+    pub db: f32,
+    pub muted: bool,
+}
+
+impl EndpointVolume {
+    /// The factor this volume applies to the sound (from its dB level; 0 when muted or at 0%).
+    pub fn gain(&self) -> f32 {
+        if self.muted || self.scalar <= 0.0 { 0.0 } else { 10f32.powf(self.db / 20.0).min(1.0) }
+    }
+}
+
 pub trait AudioHost: Send + Sync {
     fn now_ns(&self) -> Nanos;
     fn devices(&self, dir: Direction) -> Result<Vec<DeviceInfo>, AudioError>;
@@ -129,8 +145,12 @@ pub trait AudioHost: Send + Sync {
     fn open_input(&self, sel: &DeviceSelector, sink: Box<dyn CaptureSink>) -> Result<Stream, AudioError>;
     /// Time from a loopback capture timestamp until that sample reaches the device's DAC.
     fn probe_loopback_latency(&self, sel: &DeviceSelector) -> Result<Nanos, AudioError>;
-    /// Endpoint volume scalar (0..=1) and mute state.
-    fn endpoint_volume(&self, sel: &DeviceSelector) -> Result<(f32, bool), AudioError>;
+    /// The device's own volume (the OS volume slider) and mute.
+    fn endpoint_volume(&self, sel: &DeviceSelector) -> Result<EndpointVolume, AudioError>;
+    /// Moves the device's own volume slider (0..=1).
+    fn set_endpoint_volume(&self, sel: &DeviceSelector, scalar: f32) -> Result<(), AudioError>;
+    /// Mutes or unmutes the device itself.
+    fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError>;
     /// Number of other processes' active render sessions on the endpoint.
     fn active_sessions(&self, sel: &DeviceSelector) -> Result<usize, AudioError>;
     /// Calls `on_event` on device changes until the returned guard is dropped.
@@ -150,5 +170,20 @@ pub fn default_host() -> Result<Arc<dyn AudioHost>, AudioError> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         Err(AudioError::Unsupported("no audio backend for this platform"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_volume_gain_follows_decibels_not_the_slider() {
+        // Windows' slider is a loudness curve: 50% is -10.5 dB, i.e. a gain of 0.30, not 0.5.
+        let v = EndpointVolume { scalar: 0.5, db: -10.5, muted: false };
+        assert!((v.gain() - 0.2985).abs() < 1e-3, "{}", v.gain());
+        assert_eq!(EndpointVolume { scalar: 1.0, db: 0.0, muted: false }.gain(), 1.0);
+        assert_eq!(EndpointVolume { scalar: 1.0, db: 0.0, muted: true }.gain(), 0.0);
+        assert_eq!(EndpointVolume { scalar: 0.0, db: -96.0, muted: false }.gain(), 0.0, "0% is silence");
     }
 }

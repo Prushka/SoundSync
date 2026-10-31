@@ -6,15 +6,29 @@ use windows::Win32::System::Com::CLSCTX_ALL;
 
 use super::com::os_err;
 use super::enumerate::resolve;
-use crate::{AudioError, DeviceSelector, Direction};
+use crate::{AudioError, DeviceSelector, Direction, EndpointVolume};
 
-pub(crate) fn endpoint_volume(sel: &DeviceSelector) -> Result<(f32, bool), AudioError> {
+fn endpoint(sel: &DeviceSelector) -> Result<IAudioEndpointVolume, AudioError> {
     let (_, device) = resolve(Direction::Render, sel)?;
-    let vol: IAudioEndpointVolume =
-        unsafe { device.as_immdevice().Activate(CLSCTX_ALL, None) }.map_err(|e| os_err("activate endpoint volume", e))?;
-    let level = unsafe { vol.GetMasterVolumeLevelScalar() }.map_err(|e| os_err("get volume", e))?;
+    unsafe { device.as_immdevice().Activate(CLSCTX_ALL, None) }.map_err(|e| os_err("activate endpoint volume", e))
+}
+
+pub(crate) fn endpoint_volume(sel: &DeviceSelector) -> Result<EndpointVolume, AudioError> {
+    let vol = endpoint(sel)?;
+    let scalar = unsafe { vol.GetMasterVolumeLevelScalar() }.map_err(|e| os_err("get volume", e))?;
+    let db = unsafe { vol.GetMasterVolumeLevel() }.map_err(|e| os_err("get volume level", e))?;
     let muted = unsafe { vol.GetMute() }.map_err(|e| os_err("get mute", e))?.as_bool();
-    Ok((level, muted))
+    Ok(EndpointVolume { scalar, db, muted })
+}
+
+pub(crate) fn set_endpoint_volume(sel: &DeviceSelector, scalar: f32) -> Result<(), AudioError> {
+    let vol = endpoint(sel)?;
+    unsafe { vol.SetMasterVolumeLevelScalar(scalar.clamp(0.0, 1.0), std::ptr::null()) }.map_err(|e| os_err("set volume", e))
+}
+
+pub(crate) fn set_endpoint_mute(sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {
+    let vol = endpoint(sel)?;
+    unsafe { vol.SetMute(muted, std::ptr::null()) }.map_err(|e| os_err("set mute", e))
 }
 
 /// Active render sessions on the endpoint that belong to other processes.

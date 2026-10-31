@@ -57,6 +57,8 @@ pub struct SlotStats {
     pub format_changed: AtomicBool,
     pub layout_kind: AtomicU8,
     pub presentation_offset_ns: AtomicI64,
+    /// Gain this stream follows from its master's volume (f32 bits; 1.0 when not following).
+    pub master_volume_bits: AtomicU32,
 }
 
 impl Default for SlotStats {
@@ -71,6 +73,7 @@ impl Default for SlotStats {
             format_changed: AtomicBool::new(false),
             layout_kind: AtomicU8::new(0),
             presentation_offset_ns: AtomicI64::new(0),
+            master_volume_bits: AtomicU32::new(1.0f32.to_bits()),
         }
     }
 }
@@ -244,6 +247,7 @@ impl Mixer {
             } else {
                 1.0
             };
+            slot.stats.master_volume_bits.store(master_gain.to_bits(), Ordering::Relaxed);
             let gain = if paused { 0.0 } else { slot.gain * master_gain };
             let report = slot.player.render_add(out, t, &clock, extra, gain);
             let stats = slot.player.stats();

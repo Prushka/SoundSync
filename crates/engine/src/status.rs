@@ -39,6 +39,8 @@ pub struct StreamStatus {
     pub behind_ns: Nanos,
     pub lost_frames: u64,
     pub layout_warning: Option<String>,
+    /// Gain followed from the master's volume (1.0 when not following).
+    pub master_volume: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -70,7 +72,10 @@ pub struct Status {
     /// Stream playback is paused (calibration or sync test in progress).
     pub streams_paused: bool,
     pub inbound_ok: bool,
+    /// The Volume slider: the output device's own volume, or SoundSync's level without one.
     pub volume: f32,
+    /// The output whose own volume `volume` is (None: SoundSync's software level).
+    pub volume_device: Option<String>,
     pub muted: bool,
     pub extra_latency_ns: Nanos,
 }
@@ -95,6 +100,7 @@ impl Default for Status {
             streams_paused: false,
             inbound_ok: true,
             volume: 1.0,
+            volume_device: None,
             muted: false,
             extra_latency_ns: 0,
         }

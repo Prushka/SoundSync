@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use crate::null::{ThreadStream, WakeTracker, open_null_output};
 use crate::select::{DeviceSelector, select_device};
 use crate::{
-    AudioError, AudioHost, CaptureInfo, CaptureSink, DeviceEvent, DeviceInfo, Direction, LoopbackOptions, Nanos, OutputOptions,
+    AudioError, AudioHost, CaptureInfo, CaptureSink, DeviceEvent, DeviceInfo, Direction, EndpointVolume, LoopbackOptions, Nanos, OutputOptions,
     RenderCallback, RenderTiming, Stream, StreamFormat,
 };
 
@@ -130,6 +130,8 @@ struct Inner {
     removed: HashSet<String>,
     /// The default render device (None: the first one).
     default_render: Option<String>,
+    /// Devices' own volume (slider 0..=1, mute); unset means 100% and unmuted.
+    volumes: HashMap<String, (f32, bool)>,
     watchers: Vec<(u64, Watcher)>,
     next_watcher: u64,
 }
@@ -154,6 +156,19 @@ fn device_sleep(d: Duration) {
         std::env::var("SS_FAKE_MIN_SLEEP_MS").ok().and_then(|v| v.parse().ok()).map_or(Duration::ZERO, Duration::from_millis)
     });
     std::thread::sleep(d.max(min));
+}
+
+/// The fake devices' volume curve, like Windows' (50% is about -10.5 dB): code must use dB.
+fn fake_db(scalar: f32) -> f32 {
+    if scalar <= 0.0 { -96.0 } else { (35.0 * scalar.log10()).max(-96.0) }
+}
+
+/// What a device's own volume does to the sound it plays (1.0 at 100%, 0 when muted).
+fn device_gain(inner: &Mutex<Inner>, name: &str) -> f32 {
+    match inner.lock().unwrap().volumes.get(name) {
+        Some(&(scalar, muted)) => EndpointVolume { scalar, db: fake_db(scalar), muted }.gain(),
+        None => 1.0,
+    }
 }
 
 fn device_removed(inner: &Mutex<Inner>, name: &str) -> bool {
@@ -331,6 +346,10 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
             out.fill(0.0);
             let dac = time.host(frame_true(written).round() as Nanos) + spec.reported_latency_ns;
             cb.render(out, fmt, RenderTiming { now_ns: time.host(now), dac_time_ns: dac });
+            let gain = device_gain(&inner, &spec.name); // the device's own volume, as Windows applies it
+            if gain != 1.0 {
+                out.iter_mut().for_each(|x| *x *= gain);
+            }
             let shift = (spec.reported_latency_ns + spec.hidden_latency_ns) as f64;
             for j in 0..n {
                 let w = written + j as i64;
@@ -485,8 +504,22 @@ impl AudioHost for FakeHost {
         self.source_spec(&name).map(|s| s.probe_offset_ns).ok_or(AudioError::Unsupported("not a loopback source"))
     }
 
-    fn endpoint_volume(&self, _sel: &DeviceSelector) -> Result<(f32, bool), AudioError> {
-        Ok((1.0, false))
+    fn endpoint_volume(&self, sel: &DeviceSelector) -> Result<EndpointVolume, AudioError> {
+        let name = self.resolve(sel)?;
+        let (scalar, muted) = self.inner.lock().unwrap().volumes.get(&name).copied().unwrap_or((1.0, false));
+        Ok(EndpointVolume { scalar, db: fake_db(scalar), muted })
+    }
+
+    fn set_endpoint_volume(&self, sel: &DeviceSelector, scalar: f32) -> Result<(), AudioError> {
+        let name = self.resolve(sel)?;
+        self.inner.lock().unwrap().volumes.entry(name).or_insert((1.0, false)).0 = scalar.clamp(0.0, 1.0);
+        Ok(())
+    }
+
+    fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {
+        let name = self.resolve(sel)?;
+        self.inner.lock().unwrap().volumes.entry(name).or_insert((1.0, false)).1 = muted;
+        Ok(())
     }
 
     fn active_sessions(&self, sel: &DeviceSelector) -> Result<usize, AudioError> {

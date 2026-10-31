@@ -102,6 +102,7 @@ mod tests {
             behind_ns,
             lost_frames: 0,
             layout_warning: None,
+            master_volume: 1.0,
         }
     }
 

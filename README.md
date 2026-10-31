@@ -67,10 +67,19 @@ Starting SoundSync again brings up the running instance's window.
 | Settings | `%APPDATA%\SoundSync\config.toml` | SoundSync, first start |
 | Logs and state | `%LOCALAPPDATA%\SoundSync\` | SoundSync |
 
-Neither the installer nor SoundSync writes to the registry, and there is no *Apps & features* entry. Two
-things SoundSync changes only at your request and puts back: the Windows default output (only with
-**Switch Windows default output to VB-CABLE while broadcasting**; restored when broadcasting stops, on exit,
-when Windows shuts down and after a crash) and the Startup shortcut.
+Neither the installer nor SoundSync writes to the registry, and there is no *Apps & features* entry. What
+SoundSync changes, only at your request: the Windows default output (only with **Switch Windows default output
+to VB-CABLE while broadcasting**; restored when broadcasting stops, on exit, when Windows shuts down and after
+a crash), the Startup shortcut, and the output's own volume and mute when you move SoundSync's **Volume**
+slider or tick **Mute**.
+
+### Volume
+
+SoundSync's **Volume** slider and **Mute** are the output device's own volume, the same slider as in Windows'
+sound settings (or macOS's): moving either moves both. With **Follow master volume** (on by default), streams
+also get quieter when the volume is turned down on the PC that broadcasts them, by the same amount in decibels
+as on that PC (in VB-CABLE mode that is CABLE Input's volume, which the volume keys change while CABLE Input
+is the default output).
 
 ### Updating
 
@@ -158,7 +167,7 @@ switch_default = false
 
 [playback]
 output_device = ""    # empty = default output
-volume = 1.0
+volume = 1.0          # only for outputs without their own volume control ("null")
 follow_master_volume = true
 play_remote = true
 extra_latency_ms = 0.0

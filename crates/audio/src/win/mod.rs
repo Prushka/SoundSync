@@ -13,7 +13,7 @@ mod volume;
 pub use com::now_ns;
 
 use crate::{
-    AudioError, AudioHost, CaptureSink, DeviceEvent, DeviceInfo, DeviceSelector, Direction, LoopbackOptions, Nanos, OutputOptions,
+    AudioError, AudioHost, CaptureSink, DeviceEvent, DeviceInfo, DeviceSelector, Direction, EndpointVolume, LoopbackOptions, Nanos, OutputOptions,
     RenderCallback, Stream,
 };
 
@@ -70,8 +70,16 @@ impl AudioHost for WinHost {
         Ok(0)
     }
 
-    fn endpoint_volume(&self, sel: &DeviceSelector) -> Result<(f32, bool), AudioError> {
+    fn endpoint_volume(&self, sel: &DeviceSelector) -> Result<EndpointVolume, AudioError> {
         volume::endpoint_volume(sel)
+    }
+
+    fn set_endpoint_volume(&self, sel: &DeviceSelector, scalar: f32) -> Result<(), AudioError> {
+        volume::set_endpoint_volume(sel, scalar)
+    }
+
+    fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {
+        volume::set_endpoint_mute(sel, muted)
     }
 
     fn active_sessions(&self, sel: &DeviceSelector) -> Result<usize, AudioError> {
@@ -136,8 +144,8 @@ mod tests {
     #[ignore = "requires audio hardware"]
     fn endpoint_volume_reads_scalar() {
         let host = WinHost::new().unwrap();
-        let (v, _muted) = host.endpoint_volume(&crate::DeviceSelector::Default).unwrap();
-        assert!((0.0..=1.0).contains(&v), "volume {v}");
+        let v = host.endpoint_volume(&crate::DeviceSelector::Default).unwrap();
+        assert!((0.0..=1.0).contains(&v.scalar) && v.db <= 0.0, "volume {v:?}");
     }
 
     #[test]

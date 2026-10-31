@@ -157,19 +157,28 @@ fn playback(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
         }
         ui.end_row();
         ui.label("Volume");
-        let mut v = st.volume;
-        if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(true)).changed() {
-            app.command(Command::SetVolume(v));
+        let mut percent = (st.volume * 100.0).round();
+        let what = match &st.volume_device {
+            Some(device) => format!("The volume of {device} itself: the same slider as in the system's sound settings"),
+            None => "SoundSync's own level (this output has no volume control of its own)".to_string(),
+        };
+        if ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix("%")).on_hover_text(what).changed() {
+            app.command(Command::SetVolume(percent / 100.0));
         }
         ui.end_row();
     });
     ui.horizontal(|ui| {
         let mut muted = st.muted;
-        if ui.checkbox(&mut muted, "Mute").changed() {
+        let mute_hint = st.volume_device.as_ref().map_or_else(|| "Mutes SoundSync on this PC".to_string(), |d| format!("Mutes {d}"));
+        if ui.checkbox(&mut muted, "Mute").on_hover_text(mute_hint).changed() {
             app.command(Command::SetMuted(muted));
         }
         let mut follow = config.playback.follow_master_volume;
-        if ui.checkbox(&mut follow, "Follow master volume").changed() {
+        if ui
+            .checkbox(&mut follow, "Follow master volume")
+            .on_hover_text("Streams also get quieter when the volume is turned down on the PC that broadcasts them")
+            .changed()
+        {
             app.command(Command::SetFollowMasterVolume(follow));
         }
         let mut remote = config.playback.play_remote;

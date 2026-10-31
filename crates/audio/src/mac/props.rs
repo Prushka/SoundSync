@@ -6,7 +6,9 @@ use std::ptr::NonNull;
 use coreaudio::audio_unit::Scope;
 use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_audio_device_supports_scope, get_default_device_id, get_device_name};
 use objc2_core_audio::{
-    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress, kAudioDevicePropertyBufferFrameSize,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectHasProperty, AudioObjectID, AudioObjectIsPropertySettable,
+    AudioObjectPropertyAddress, AudioObjectSetPropertyData, kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyMute,
+    kAudioDevicePropertyVolumeDecibels, kAudioDevicePropertyVolumeScalar,
     kAudioDevicePropertyBufferFrameSizeRange, kAudioDevicePropertyLatency, kAudioDevicePropertyNominalSampleRate,
     kAudioDevicePropertyPreferredChannelLayout, kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreams,
     kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput,
@@ -14,7 +16,7 @@ use objc2_core_audio::{
 };
 use soundsync_core::layout::{default_mask, mask_from_coreaudio_labels};
 
-use crate::{DeviceInfo, Direction, Nanos, StreamFormat};
+use crate::{DeviceInfo, Direction, EndpointVolume, Nanos, StreamFormat};
 
 fn scope(dir: Direction) -> u32 {
     match dir {
@@ -25,6 +27,64 @@ fn scope(dir: Direction) -> u32 {
 
 fn address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress { mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain }
+}
+
+fn element_address(selector: u32, element: u32) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress { mSelector: selector, mScope: kAudioObjectPropertyScopeOutput, mElement: element }
+}
+
+fn get_output<T: Copy + Default>(id: AudioObjectID, selector: u32, element: u32) -> Option<T> {
+    let addr = element_address(selector, element);
+    let mut value = T::default();
+    let mut size = std::mem::size_of::<T>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(id, NonNull::from(&addr), 0, std::ptr::null(), NonNull::from(&mut size), NonNull::from(&mut value).cast::<c_void>())
+    };
+    (status == 0).then_some(value)
+}
+
+fn set_output<T: Copy>(id: AudioObjectID, selector: u32, element: u32, value: T) -> bool {
+    let addr = element_address(selector, element);
+    let mut settable: u8 = 0;
+    if unsafe { AudioObjectIsPropertySettable(id, NonNull::from(&addr), NonNull::from(&mut settable)) } != 0 || settable == 0 {
+        return false;
+    }
+    let status = unsafe {
+        AudioObjectSetPropertyData(id, NonNull::from(&addr), 0, std::ptr::null(), std::mem::size_of::<T>() as u32, NonNull::from(&value).cast::<c_void>())
+    };
+    status == 0
+}
+
+/// Elements carrying the output volume: the main one, or the first two channels on devices that
+/// only have per-channel volume.
+fn volume_elements(id: AudioObjectID, selector: u32) -> Vec<u32> {
+    let has = |e: u32| unsafe { AudioObjectHasProperty(id, NonNull::from(&element_address(selector, e))) };
+    if has(kAudioObjectPropertyElementMain) { vec![kAudioObjectPropertyElementMain] } else { [1, 2].into_iter().filter(|&e| has(e)).collect() }
+}
+
+/// The device's output volume (averaged over its volume elements) and mute.
+pub(crate) fn volume(id: AudioObjectID) -> Option<EndpointVolume> {
+    let elements = volume_elements(id, kAudioDevicePropertyVolumeScalar);
+    if elements.is_empty() {
+        return None;
+    }
+    let avg = |selector: u32| {
+        let v: Vec<f32> = elements.iter().filter_map(|&e| get_output::<f32>(id, selector, e)).collect();
+        (!v.is_empty()).then(|| v.iter().sum::<f32>() / v.len() as f32)
+    };
+    let scalar = avg(kAudioDevicePropertyVolumeScalar)?;
+    let db = avg(kAudioDevicePropertyVolumeDecibels).unwrap_or(if scalar > 0.0 { 20.0 * scalar.log10() } else { -96.0 });
+    let muted = get_output::<u32>(id, kAudioDevicePropertyMute, kAudioObjectPropertyElementMain).is_some_and(|m| m != 0);
+    Some(EndpointVolume { scalar, db, muted })
+}
+
+pub(crate) fn set_volume(id: AudioObjectID, scalar: f32) -> bool {
+    let elements = volume_elements(id, kAudioDevicePropertyVolumeScalar);
+    !elements.is_empty() && elements.iter().all(|&e| set_output(id, kAudioDevicePropertyVolumeScalar, e, scalar))
+}
+
+pub(crate) fn set_mute(id: AudioObjectID, muted: bool) -> bool {
+    set_output(id, kAudioDevicePropertyMute, kAudioObjectPropertyElementMain, muted as u32)
 }
 
 /// Fixed-size property value.
