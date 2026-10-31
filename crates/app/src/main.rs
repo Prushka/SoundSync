@@ -49,6 +49,13 @@ fn restore_defaults_at_session_end(state_file: std::path::PathBuf) {
     }
 }
 
+/// `soundsync restore-defaults`: restores the default output devices saved in state.toml.
+fn restore_defaults_now(paths: &Paths) -> anyhow::Result<()> {
+    let restored = default_devices_api().and_then(|api| soundsync_engine::defaults::DefaultSwitchGuard::new(api, paths.state_file.clone()).recover_on_start());
+    println!("{}", restored.unwrap_or_else(|| "nothing to restore".into()));
+    Ok(())
+}
+
 /// Writes the app icon (1024x1024 PNG) for the macOS bundle script.
 fn write_icon_png(path: &std::path::Path) -> anyhow::Result<()> {
     let size = 1024;
@@ -93,6 +100,7 @@ fn main() -> anyhow::Result<()> {
             args.config,
             args.instance.as_deref(),
         ),
+        Some(Cmd::RestoreDefaults) => restore_defaults_now(&Paths::for_instance(args.instance.as_deref())),
         Some(Cmd::GenIcon { png, plist }) => {
             if let Some(p) = png {
                 write_icon_png(&p)?;

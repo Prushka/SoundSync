@@ -1,12 +1,15 @@
 # Per-user SoundSync install (no admin, except the optional firewall rule).
 #
-#   install-windows.ps1                 install next to-script soundsync.exe, Start Menu + Startup
-#                                       shortcuts, and allow inbound UDP in Windows Firewall (UAC)
+#   install-windows.ps1                 copy soundsync.exe (next to this script) and the
+#                                       uninstaller to %LOCALAPPDATA%\Programs\SoundSync, create
+#                                       Start Menu + Startup shortcuts, and allow inbound UDP in
+#                                       Windows Firewall (UAC)
 #   install-windows.ps1 -NoFirewall     skip the elevated firewall step
-#   install-windows.ps1 -Remove         remove shortcuts, the installed exe and the firewall rule
-#                                       (settings and logs are kept)
+#   install-windows.ps1 -Start          open SoundSync when done
+#   install-windows.ps1 -Remove         same as uninstall-windows.ps1 (settings and logs are kept)
 #
-# Shortcuts that point at another program are never replaced or removed.
+# Running it again updates an existing install: a running SoundSync is quit, replaced and
+# started again. Shortcuts that point at another program are never replaced or removed.
 [CmdletBinding()]
 param(
     [switch]$Remove,
@@ -68,37 +71,23 @@ function Invoke-Elevated([string]$Script) {
     if ($p.ExitCode -ne 0) { throw "Elevated firewall step failed (exit $($p.ExitCode))." }
 }
 
+# Quits the installed SoundSync if it runs; returns whether it was running.
 function Stop-Installed {
-    if (Test-Path -LiteralPath $AppPath) {
-        $running = Get-Process -Name soundsync -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $AppPath }
-        if ($running) {
-            & $AppPath --quit
-            $running | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
-        }
-    }
+    $running = @(Get-Process -Name soundsync -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $AppPath })
+    if (-not $running) { return $false }
+    & $AppPath --quit | Out-Null
+    $running | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+    if (@($running | Where-Object { -not $_.HasExited })) { throw 'SoundSync did not quit; quit it from the tray and run this again.' }
+    return $true
 }
 
 try {
     if ($Remove) {
-        foreach ($lnk in @($StartupLnk, $MenuLnk)) {
-            if ((Test-Path -LiteralPath $lnk) -and (Test-Owned $lnk)) {
-                Remove-Item -LiteralPath $lnk -Force
-                Write-Host "Removed $lnk"
-            }
-        }
-        Stop-Installed
-        if (Test-Path -LiteralPath $AppPath) {
-            Remove-Item -LiteralPath $AppPath -Force
-            Write-Host "Removed $AppPath"
-        }
-        if ((Test-Path -LiteralPath $InstallDir) -and -not (Get-ChildItem -LiteralPath $InstallDir)) {
-            Remove-Item -LiteralPath $InstallDir
-        }
-        if (-not $NoFirewall) {
-            Invoke-Elevated "Remove-NetFirewallRule -DisplayName '$RuleName' -ErrorAction SilentlyContinue; exit 0"
-            Write-Host "Removed firewall rule '$RuleName'"
-        }
-        Write-Host 'Settings and logs were kept (%APPDATA%\SoundSync, %LOCALAPPDATA%\SoundSync).'
+        $uninstall = Join-Path $PSScriptRoot 'uninstall-windows.ps1'
+        if (-not (Test-Path -LiteralPath $uninstall)) { throw "uninstall-windows.ps1 not found next to this script." }
+        $options = @{ NoFirewall = $NoFirewall }
+        if ($InstallRoot) { $options.InstallRoot = $InstallRoot }
+        & $uninstall @options
         return
     }
 
@@ -106,10 +95,15 @@ try {
     Assert-OwnedShortcut $StartupLnk
     Assert-OwnedShortcut $MenuLnk
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $wasRunning = $false
     if ((Resolve-Path -LiteralPath $SourceExe).Path -ne $AppPath) {
-        Stop-Installed
+        $wasRunning = Stop-Installed
         Copy-Item -LiteralPath $SourceExe -Destination $AppPath -Force
         Write-Host "Installed $AppPath"
+    }
+    $uninstaller = Join-Path $PSScriptRoot 'uninstall-windows.ps1'
+    if ((Test-Path -LiteralPath $uninstaller) -and $PSScriptRoot -ne $InstallDir) {
+        Copy-Item -LiteralPath $uninstaller -Destination $InstallDir -Force
     }
     if (-not $NoStartMenu) { Write-Shortcut $MenuLnk '--show' }
     if (-not $NoStartup) { Write-Shortcut $StartupLnk '' }
@@ -119,7 +113,12 @@ try {
             "New-NetFirewallRule -DisplayName '$RuleName' -Direction Inbound -Program '$AppPath' -Protocol UDP " +
             "-LocalPort $Port,5353 -Profile Private,Domain -Action Allow | Out-Null")
     }
-    if ($Start) { Start-Process -FilePath $AppPath -ArgumentList '--show' -WorkingDirectory $InstallDir }
+    if ($Start) {
+        Start-Process -FilePath $AppPath -ArgumentList '--show' -WorkingDirectory $InstallDir
+    } elseif ($wasRunning) {
+        Start-Process -FilePath $AppPath -WorkingDirectory $InstallDir # back in the tray after an update
+        Write-Host 'Restarted SoundSync'
+    }
     Write-Host "SoundSync installed to $InstallDir"
 } finally {
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)

@@ -41,6 +41,9 @@ pub struct Cli {
 pub enum Cmd {
     /// List audio devices with their formats and periods.
     Devices,
+    /// Put back Windows default output devices SoundSync switched and could not restore (it
+    /// normally does that itself on exit or at its next start; the uninstaller runs this).
+    RestoreDefaults,
     /// Play a test tone (or pulses) on a device.
     Tone {
         #[arg(long, default_value = "default")]
@@ -231,5 +234,19 @@ pub fn measure(host: &dyn AudioHost, device: Option<String>, a: Option<String>, 
             Ok(())
         }
         _ => anyhow::bail!("use --device <name>, or --a <name> --b <name>"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_defaults_command_parses() {
+        // The uninstaller runs this before deleting SoundSync.
+        let cli = Cli::try_parse_from(["soundsync", "restore-defaults"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::RestoreDefaults)));
+        let cli = Cli::try_parse_from(["soundsync", "--instance", "x", "restore-defaults"]).unwrap();
+        assert_eq!(cli.instance.as_deref(), Some("x"));
     }
 }

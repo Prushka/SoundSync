@@ -39,9 +39,10 @@ again and echo).
    powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Start
    ```
 
-   This copies `soundsync.exe` to `%LOCALAPPDATA%\Programs\SoundSync`, creates Start Menu and Startup
-   shortcuts and asks once for administrator rights to allow SoundSync through Windows Firewall
-   (inbound UDP 47810 and 5353, private and domain networks only). Nothing else needs administrator rights.
+   This copies `soundsync.exe` and `uninstall-windows.ps1` to `%LOCALAPPDATA%\Programs\SoundSync`, creates
+   Start Menu and Startup shortcuts and asks once for administrator rights to allow SoundSync through
+   Windows Firewall (inbound UDP 47810 and 5353, private and domain networks only). Nothing else needs
+   administrator rights.
 
    | Flag | Effect |
    |---|---|
@@ -49,10 +50,50 @@ again and echo).
    | `-NoStartup` | Do not start with Windows (can be changed later in Settings) |
    | `-NoStartMenu` | No Start Menu shortcut |
    | `-Port N` | Firewall rule for a different `network.port` |
-   | `-Remove` | Remove the shortcuts, the installed exe and the firewall rule; settings and logs are kept |
+   | `-Start` | Open SoundSync when done |
+   | `-Remove` | Same as `uninstall-windows.ps1` |
 
 SoundSync lives in the tray. Closing the window hides it; use **Quit** in the tray menu to exit.
 Starting SoundSync again brings up the running instance's window.
+
+### What is installed where
+
+| What | Where | Created by |
+|---|---|---|
+| Program | `%LOCALAPPDATA%\Programs\SoundSync\soundsync.exe` (+ `uninstall-windows.ps1`) | installer |
+| Start Menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\SoundSync.lnk` | installer |
+| Start with Windows | `…\Start Menu\Programs\Startup\SoundSync.lnk` | installer, or **Settings ▸ Start with Windows** |
+| Firewall rule *SoundSync (UDP in)* | Windows Firewall (for this exe's path) | installer (administrator) |
+| Settings | `%APPDATA%\SoundSync\config.toml` | SoundSync, first start |
+| Logs and state | `%LOCALAPPDATA%\SoundSync\` | SoundSync |
+
+Neither the installer nor SoundSync writes to the registry, and there is no *Apps & features* entry. Two
+things SoundSync changes only at your request and puts back: the Windows default output (only with
+**Switch Windows default output to VB-CABLE while broadcasting**; restored when broadcasting stops, on exit,
+when Windows shuts down and after a crash) and the Startup shortcut.
+
+### Updating
+
+Run the new release's `install-windows.ps1` (add `-NoFirewall` if the rule already exists, to skip the
+administrator prompt). It quits the running SoundSync, replaces the program and starts it again; settings,
+logs and the firewall rule (tied to the program's path) stay as they are.
+
+Replacing the file by hand works too: **Quit** SoundSync from the tray (a running exe cannot be replaced),
+copy the new `soundsync.exe` over `%LOCALAPPDATA%\Programs\SoundSync\soundsync.exe` and start it.
+
+Update every PC in a group to the same release: versions with a different network protocol cannot talk to
+each other.
+
+### Uninstalling
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\SoundSync\uninstall-windows.ps1"
+```
+
+(or the `uninstall-windows.ps1` in the release folder). It quits SoundSync, puts back the default output
+devices if SoundSync left them switched, removes the shortcuts, the program and the firewall rule (asking for
+administrator rights only if the rule exists). Settings and logs are kept unless you add `-Purge`;
+`-NoFirewall` leaves the firewall rule. VB-CABLE is a separate program: uninstall it from *Apps & features*.
 
 ### VB-CABLE (for VB-CABLE mode)
 

@@ -1,5 +1,5 @@
 # Builds the release exe and stages dist\windows\SoundSync\ plus dist\SoundSync-windows-x64.zip
-# (soundsync.exe, install-windows.ps1, README.md) for copying to other PCs.
+# (soundsync.exe, install-windows.ps1, uninstall-windows.ps1, README.md) for copying to other PCs.
 [CmdletBinding()]
 param([switch]$SkipTests)
 
@@ -25,7 +25,9 @@ try {
 
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 Copy-Item -LiteralPath (Join-Path $Root 'target\release\soundsync.exe') -Destination $Exe -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-windows.ps1') -Destination $Dist -Force
+foreach ($script in 'install-windows.ps1', 'uninstall-windows.ps1') {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination $Dist -Force
+}
 $readme = Join-Path $Root 'README.md'
 if (Test-Path -LiteralPath $readme) { Copy-Item -LiteralPath $readme -Destination $Dist -Force }
 if (Test-Path -LiteralPath $Zip) { Remove-Item -LiteralPath $Zip -Force }
