@@ -98,6 +98,32 @@ impl Drop for ThreadStream {
     }
 }
 
+/// Tracks how late a polling device thread wakes up, so the null and fake devices keep enough
+/// audio buffered to ride out their own scheduling (a loaded PC, or a CI machine whose timers
+/// fire 10-20 ms late). Real devices are clocked by their hardware callbacks instead.
+pub(crate) struct WakeTracker {
+    worst_ns: f64,
+}
+
+impl WakeTracker {
+    pub(crate) fn new(nominal: Duration) -> Self {
+        WakeTracker { worst_ns: nominal.as_nanos() as f64 }
+    }
+
+    /// Sleeps `d` through `sleep` and records how long it really took.
+    pub(crate) fn sleep(&mut self, d: Duration, sleep: impl Fn(Duration)) {
+        let t = std::time::Instant::now();
+        sleep(d);
+        let took = t.elapsed().as_nanos() as f64;
+        self.worst_ns = took.max(self.worst_ns * 0.97);
+    }
+
+    /// Audio to keep buffered beyond what is playing, in ns.
+    pub(crate) fn lead_ns(&self) -> f64 {
+        2.0 * self.worst_ns
+    }
+}
+
 /// Calls `cb` on a 10 ms cadence as if a device played `format` with 10 ms of latency.
 pub fn open_null_output(now: Arc<dyn Fn() -> Nanos + Send + Sync>, format: StreamFormat, mut cb: Box<dyn RenderCallback>) -> crate::Stream {
     Box::new(ThreadStream::spawn("soundsync-null-out", format, NULL_LATENCY_NS, move |stop, _alive| {
@@ -108,13 +134,15 @@ pub fn open_null_output(now: Arc<dyn Fn() -> Nanos + Send + Sync>, format: Strea
         let mut buf = vec![0.0f32; max_frames * ch];
         let start = now();
         let mut written: i64 = 0;
+        let mut wake = WakeTracker::new(Duration::from_millis(2));
         while !stop.load(Ordering::Acquire) {
             let t = now();
             let elapsed = ((t - start) as i128 * rate as i128 / 1_000_000_000) as i64;
             if elapsed > written {
                 written = elapsed; // stalled past the buffer: an underrun, like a real device
             }
-            let target = elapsed + period;
+            let lead = (wake.lead_ns() * rate as f64 / 1e9) as i64;
+            let target = elapsed + period.max(lead);
             if target > written {
                 let n = ((target - written) as usize).min(max_frames);
                 let dac = start + NULL_LATENCY_NS + (written as i128 * 1_000_000_000 / rate as i128) as Nanos;
@@ -123,7 +151,7 @@ pub fn open_null_output(now: Arc<dyn Fn() -> Nanos + Send + Sync>, format: Strea
                 cb.render(out, format, RenderTiming { now_ns: t, dac_time_ns: dac });
                 written += n as i64;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            wake.sleep(Duration::from_millis(2), std::thread::sleep);
         }
     }))
 }
@@ -150,6 +178,19 @@ mod tests {
     }
 
     #[test]
+    fn wake_tracker_buffers_for_late_wakeups() {
+        let mut w = WakeTracker::new(Duration::from_millis(2));
+        assert!(w.lead_ns() < 10e6, "a punctual thread needs little headroom: {}", w.lead_ns());
+        // A machine whose 2 ms sleeps take 20 ms (GitHub's macOS runners).
+        w.sleep(Duration::from_millis(2), |_| std::thread::sleep(Duration::from_millis(20)));
+        assert!(w.lead_ns() >= 40e6, "lead {}", w.lead_ns());
+        for _ in 0..200 {
+            w.sleep(Duration::from_millis(2), |_| {});
+        }
+        assert!(w.lead_ns() < 10e6, "headroom shrinks again once wake-ups are punctual: {}", w.lead_ns());
+    }
+
+    #[test]
     fn null_output_calls_back_at_real_time_rate() {
         // CI machines oversleep; a stalled render (here: the callback blocks 50 ms once) must
         // skip ahead like a real device's underrun, never report a DAC time in the past.
@@ -161,11 +202,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         drop(stream);
         let g = seen.lock().unwrap();
-        assert!(g.0 <= 50_000, "never renders ahead of real time: {} frames", g.0);
+        assert!(g.0 <= 48_000 + 4_800, "never renders far ahead of real time: {} frames", g.0);
         assert!(g.0 >= 30_000, "frames {}", g.0);
         for t in &g.1 {
             let lead = t.dac_time_ns - t.now_ns;
-            assert!((0..=20_000_000).contains(&lead), "lead {lead}");
+            assert!((0..=110_000_000).contains(&lead), "lead {lead}");
         }
         assert!(g.1.windows(2).all(|w| w[1].dac_time_ns > w[0].dac_time_ns));
     }

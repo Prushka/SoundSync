@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::null::{ThreadStream, open_null_output};
+use crate::null::{ThreadStream, WakeTracker, open_null_output};
 use crate::select::{DeviceSelector, select_device};
 use crate::{
     AudioError, AudioHost, CaptureInfo, CaptureSink, DeviceEvent, DeviceInfo, Direction, LoopbackOptions, Nanos, OutputOptions,
@@ -146,6 +146,16 @@ impl Drop for WatchGuard {
     }
 }
 
+/// Sleep of the simulated device threads. `SS_FAKE_MIN_SLEEP_MS` makes every sleep at least that
+/// long, reproducing machines whose timers fire late (GitHub's macOS runners sleep ~20 ms).
+fn device_sleep(d: Duration) {
+    static MIN: OnceLock<Duration> = OnceLock::new();
+    let min = *MIN.get_or_init(|| {
+        std::env::var("SS_FAKE_MIN_SLEEP_MS").ok().and_then(|v| v.parse().ok()).map_or(Duration::ZERO, Duration::from_millis)
+    });
+    std::thread::sleep(d.max(min));
+}
+
 fn device_removed(inner: &Mutex<Inner>, name: &str) -> bool {
     inner.lock().unwrap().removed.contains(name)
 }
@@ -183,6 +193,14 @@ impl FakeHost {
     pub fn readd_device(&self, name: &str) {
         self.inner.lock().unwrap().removed.remove(name);
         self.notify(DeviceEvent::Added(format!("fake:{name}")));
+    }
+
+    /// Changes a source's format (like "Configure speakers"); pair with remove/readd to end the
+    /// streams opened with the old format, as Windows does.
+    pub fn set_source_format(&self, name: &str, format: StreamFormat) {
+        for s in self.inner.lock().unwrap().sources.iter_mut().filter(|s| s.name == name) {
+            s.format = format;
+        }
     }
 
     /// Makes `name` the default render device (what "Default" resolves to).
@@ -288,8 +306,10 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
     let ch = fmt.channels as usize;
     let dev_rate = fmt.sample_rate as f64 * (1.0 + spec.ppm * 1e-6);
     let period = ((spec.period_ns as f64 * dev_rate / 1e9).round() as i64).max(1);
-    let mut buf = vec![0.0f32; (period as usize * 8) * ch];
+    let mut buf = vec![0.0f32; (period as usize * 16) * ch];
     let t_start = true_now() + spec.period_ns;
+    let nap = Duration::from_nanos((spec.period_ns / 4).max(500_000) as u64);
+    let mut wake = WakeTracker::new(nap);
     let frame_true = |w: i64| t_start as f64 + w as f64 * 1e9 / dev_rate;
     let mut written: i64 = 0;
     let mut det = OnsetDetector { prev: 0.0 };
@@ -302,7 +322,9 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
         if played > written {
             written = played; // underrun: the device moved on without us
         }
-        let target = played + 2 * period;
+        // At least two periods buffered, more if this thread wakes up late (it is a simulation:
+        // a real device's buffer is serviced by its own callback, not by our sleeps).
+        let target = played + (2 * period).max((wake.lead_ns() * dev_rate / 1e9) as i64);
         if target > written {
             let n = ((target - written) as usize).min(buf.len() / ch);
             let out = &mut buf[..n * ch];
@@ -328,7 +350,7 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
             }
             written += n as i64;
         }
-        std::thread::sleep(Duration::from_nanos((spec.period_ns / 4).max(500_000) as u64));
+        wake.sleep(nap, device_sleep);
     }
 }
 
@@ -382,7 +404,7 @@ fn run_source(spec: FakeSourceSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
             sink.on_capture(&buf, fmt, info);
             produced += chunk;
         }
-        std::thread::sleep(Duration::from_millis(1));
+        device_sleep(Duration::from_millis(1));
     }
 }
 
@@ -403,7 +425,7 @@ fn run_mic(name: String, hidden: Nanos, room: Arc<FakeRoom>, time: TimeMap, inne
             sink.on_capture(&buf, fmt, CaptureInfo { time_ns: t, raw_time_ns: t, frames: chunk as usize, silent: false, discontinuity: false });
             produced += chunk;
         }
-        std::thread::sleep(Duration::from_millis(1));
+        device_sleep(Duration::from_millis(1));
     }
 }
 

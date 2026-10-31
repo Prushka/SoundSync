@@ -23,6 +23,9 @@ const BEHIND_MARGIN_NS: Nanos = 2_000_000;
 const SLACK_BUCKET_NS: Nanos = 5_000_000_000;
 /// A presentation-offset change larger than this realigns at once instead of slewing.
 const OFFSET_REALIGN_NS: Nanos = 1_000_000;
+/// A DAC time this far from where the previous render left off means the device glitched (an
+/// underrun after a stall): realign at once instead of slewing for tens of seconds.
+const DAC_JUMP_NS: Nanos = 1_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderTiming {
@@ -180,6 +183,8 @@ pub struct StreamPlayer {
     /// Duration of the last device period; a frame must be buffered this much earlier too.
     period_ns: Nanos,
     last_dac: Option<Nanos>,
+    /// Where the device's timeline should be at the next render if nothing glitched.
+    next_dac: Option<Nanos>,
     slack: SlackWindow,
     lost_frames: u64,
     realigns: u64,
@@ -229,6 +234,7 @@ impl StreamPlayer {
             lead_ns: None,
             period_ns: 0,
             last_dac: None,
+            next_dac: None,
             slack: SlackWindow::default(),
             lost_frames: 0,
             realigns: 0,
@@ -360,6 +366,8 @@ impl StreamPlayer {
         self.period_ns = (out.len() / self.cfg.out.channels as usize) as Nanos * 1_000_000_000 / self.cfg.out.sample_rate as Nanos;
         let dt = self.last_dac.map_or(0, |d| t.dac_time_ns - d);
         self.last_dac = Some(t.dac_time_ns);
+        let device_glitched = self.next_dac.is_some_and(|e| (t.dac_time_ns - e).abs() > DAC_JUMP_NS);
+        self.next_dac = Some(t.dac_time_ns + self.period_ns);
         let mut report = RenderReport::default();
         if self.timeline.is_none() {
             self.state = PlayState::Waiting;
@@ -385,7 +393,7 @@ impl StreamPlayer {
         let error = t.dac_time_ns - self.target_ns(self.head_pos(), clock, extra_latency_ns, self.behind_ns).round() as Nanos;
         report.error_ns = error;
         let mut fade_out = false;
-        let decision = if std::mem::take(&mut self.offset_changed) { SyncDecision::Realign } else { self.controller.update(error, dt) };
+        let decision = if std::mem::take(&mut self.offset_changed) || device_glitched { SyncDecision::Realign } else { self.controller.update(error, dt) };
         match decision {
             SyncDecision::Realign => {
                 fade_out = true;
@@ -584,6 +592,8 @@ mod tests {
         extra_ns: Nanos,
         /// Master clock = true time + this offset; the receiver gets the matching ClockMap.
         master_clock_offset_ns: Nanos,
+        /// (at seconds, gap): the output device underruns once and moves on by `gap`.
+        underrun: Option<(f64, Nanos)>,
     }
 
     impl Default for SimCfg {
@@ -601,6 +611,7 @@ mod tests {
                 signal: Signal::Pulses,
                 extra_ns: 0,
                 master_clock_offset_ns: 0,
+                underrun: None,
             }
         }
     }
@@ -706,8 +717,15 @@ mod tests {
         let mut reports = Vec::new();
         let mut out_ch0 = Vec::new();
         let renders = (cfg.secs * cfg.out_rate as f64 / PERIOD as f64) as u64;
+        let mut skipped = 0u64;
         for k in 0..renders {
-            let j0 = k * PERIOD as u64;
+            if let Some((at, gap)) = cfg.underrun
+                && skipped == 0
+                && dac(k * PERIOD as u64) >= T0 + (at * 1e9) as Nanos
+            {
+                skipped = (gap as f64 * dev_rate / 1e9).round() as u64; // frames the device played without us
+            }
+            let j0 = k * PERIOD as u64 + skipped;
             let dac_time = dac(j0);
             let now = dac_time - cfg.lead_ns;
             while next_packet < packets.len() && packets[next_packet].arrival <= now {
@@ -784,6 +802,14 @@ mod tests {
         let realigns = r.reports.iter().filter(|(_, rep)| rep.realigned).count();
         assert_eq!(realigns, 1);
         assert_pulses_within(&r, 10.3, 200_000);
+    }
+
+    #[test]
+    fn device_underrun_realigns_at_once() {
+        // The output glitched (CPU stall): the device played 10 ms we never wrote, so its DAC time
+        // jumps ahead of the frames written. The stream must snap back instead of slewing ~30 s.
+        let r = sim(SimCfg { secs: 8.0, underrun: Some((5.0, 10_000_000)), ..Default::default() });
+        assert_pulses_within(&r, 5.2, 200_000);
     }
 
     #[test]

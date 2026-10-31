@@ -91,6 +91,9 @@ pub(crate) struct Media {
     pub capture_lost_device: Option<String>,
     /// Stream id last announced to peers (a new one is gossiped at once, not on the next round).
     announced_stream: u32,
+    /// The last requirement measured on this output, reported between streams so a restarted
+    /// broadcast starts with a delay this node can make (forgotten when the output reopens).
+    last_required: Option<Nanos>,
     last_slow: Nanos,
     last_fast: Nanos,
 }
@@ -116,6 +119,7 @@ impl Media {
             capture_reopen: None,
             capture_lost_device: None,
             announced_stream: 0,
+            last_required: None,
             last_slow: 0,
             last_fast: 0,
         }
@@ -179,6 +183,7 @@ impl Node {
     pub(crate) fn open_output(&mut self) {
         self.drop_all_slots();
         self.media.output = None;
+        self.media.last_required = None;
         let now = self.host.now_ns();
         let sel = self.output_selector();
         let mut fallback = false;
@@ -260,14 +265,24 @@ impl Node {
         if out.cmds.push(MixerCmd::AddStream(Box::new(slot))).is_ok() {
             self.media.slots.push(SlotHandle { master, stream_id, format, stats, clock, local, layout });
             if mismatch(layout) {
-                let name = if local { "This PC".to_string() } else { self.peers.get(master).map_or_else(|| format!("{master:016x}"), |p| p.name.clone()) };
-                self.warn(format!(
-                    "{name}: {} → {} (channels remapped; match the speaker layouts in Sound settings)",
-                    describe(format),
-                    describe(out_format)
-                ));
+                // Shown while it lasts (layout_warnings); logged once here.
+                tracing::warn!("{}", self.layout_warning(master, local, format, out_format));
             }
         }
+    }
+
+    fn layout_warning(&self, master: NodeId, local: bool, format: StreamFormat, out_format: StreamFormat) -> String {
+        let name = if local { "This PC".to_string() } else { self.peers.get(master).map_or_else(|| format!("{master:016x}"), |p| p.name.clone()) };
+        format!("{name}: {} → {} (channels remapped; match the speaker layouts in Sound settings)", describe(format), describe(out_format))
+    }
+
+    /// One warning per stream currently remapped to a different speaker layout (recomputed for
+    /// every status, so it clears as soon as the layouts match).
+    pub(crate) fn layout_warnings(&self) -> Vec<String> {
+        let Some(out) = &self.media.output else { return Vec::new() };
+        let mut w: Vec<String> = self.media.slots.iter().filter(|s| mismatch(s.layout)).map(|s| self.layout_warning(s.master, s.local, s.format, out.format)).collect();
+        w.dedup();
+        w
     }
 
     /// (Re)creates the slot that plays this master's own stream on the monitor output.
@@ -312,7 +327,7 @@ impl Node {
 
     /// Requirement this node reports: how much delay it needs between capture and emission.
     pub(crate) fn required_delay(&self) -> Nanos {
-        let measured = self.media.slots.iter().filter_map(|s| s.stats.required()).max();
+        let measured = self.media.slots.iter().filter_map(|s| s.stats.required()).max().or(self.media.last_required);
         match measured {
             Some(v) => v + REQUIRED_GUARD_NS,
             None => {
@@ -564,6 +579,9 @@ impl Node {
             }
         }
         self.sync_slots();
+        if let Some(v) = self.media.slots.iter().filter_map(|s| s.stats.required()).max() {
+            self.media.last_required = Some(v);
+        }
         let stream = self.media.capture.as_ref().map_or(0, |c| c.shared.stream_id.load(Ordering::Acquire));
         if stream != self.media.announced_stream && self.node_state().stream.is_some() {
             self.media.announced_stream = stream;

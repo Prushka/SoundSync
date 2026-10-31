@@ -325,7 +325,7 @@ impl Node {
 
     /// Warnings that reflect a current condition (recomputed for every status).
     fn condition_warnings(&self) -> Vec<String> {
-        let mut w = Vec::new();
+        let mut w = self.layout_warnings();
         if self.silence_suspect {
             let device = self.capture_device_name().unwrap_or_default();
             w.push(format!(

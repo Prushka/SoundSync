@@ -69,6 +69,26 @@ fn stream_start_delay_covers_known_receivers() {
 }
 
 #[test]
+fn restarted_stream_starts_with_the_delay_the_receivers_needed() {
+    // Between streams a receiver has nothing to measure; it must keep reporting what it
+    // measured, or a restarted broadcast begins with a too-small delay and plays behind.
+    let m = virtual_master("m", "TV");
+    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", 0.0, 40, None);
+    m.engine.command(Command::SetBroadcast(true));
+    sleep(Duration::from_secs(4));
+    let settled = m.engine.status().delay_ns.unwrap();
+    m.engine.command(Command::SetBroadcast(false));
+    assert!(wait_until(Duration::from_secs(3), || r1.engine.status().streams.is_empty()));
+    sleep(Duration::from_millis(1500)); // r1's next STATE goes out without a stream
+    m.engine.command(Command::SetBroadcast(true));
+    assert!(wait_until(Duration::from_secs(1), || m.engine.status().delay_ns.is_some()));
+    let first = m.engine.status().delay_ns.unwrap();
+    assert!(first >= settled, "restart began at {} ms, the receiver needed {} ms", first / MS, settled / MS);
+    r1.shutdown();
+    m.shutdown();
+}
+
+#[test]
 fn receivers_start_playing_promptly() {
     // A new stream is announced and subscribed to at once, not on the next 1 s gossip round.
     let m = virtual_master("m", "TV");
@@ -107,7 +127,8 @@ fn virtual_mode_survives_loss_and_reorder() {
 #[test]
 fn direct_mode_reports_behind() {
     let t0 = now();
-    // A TV-like master: Windows plays the captured audio 60 ms after its loopback timestamp.
+    // A TV-like master: Windows plays the captured audio 120 ms after its loopback timestamp (long
+    // enough for the fast receiver even where simulated devices buffer ~50 ms on slow CI machines).
     let m = spawn_with(
         Spec::new("m"),
         |c: &mut Config| {
@@ -115,21 +136,21 @@ fn direct_mode_reports_behind() {
             c.master.capture_device = "Speakers".into();
             c.playback.output_device = "Speakers".into();
         },
-        |h| h.add_source(pulse_source("Speakers", 60 * MS)),
+        |h| h.add_source(pulse_source("Speakers", 120 * MS)),
     );
     let fast = receiver("fast", FakeClock::default(), &m, "Kitchen", 0.0, 5, None);
-    let slow = receiver("slow", FakeClock::default(), &m, "Headphones", 0.0, 100, None);
+    let slow = receiver("slow", FakeClock::default(), &m, "Headphones", 0.0, 200, None);
     m.engine.command(Command::SetBroadcast(true));
     sleep(Duration::from_secs(8));
     let st = m.engine.status();
-    assert_eq!(st.delay_ns, Some(60 * MS), "direct mode presents at the master's own output time");
+    assert_eq!(st.delay_ns, Some(120 * MS), "direct mode presents at the master's own output time");
     assert!(st.warnings.iter().any(|w| w.contains("echo guard")), "{:?}", st.warnings);
     // The fast receiver matches what Windows plays on the master.
     let emitted: Vec<_> = m.host.onsets("Speakers");
     assert!(emitted.len() > 10);
-    assert_in_sync(&m, "Speakers", &[(&fast, "Kitchen", 0)], &[60 * MS], at(t0, 4.5), at(t0, 7.5), MS, false);
+    assert_in_sync(&m, "Speakers", &[(&fast, "Kitchen", 0)], &[120 * MS], at(t0, 4.5), at(t0, 7.5), MS, false);
     let behind = slow.engine.status().streams[0].behind_ns;
-    assert!((55 * MS..=100 * MS).contains(&behind), "slow receiver behind {} ms", behind / MS);
+    assert!((90 * MS..=150 * MS).contains(&behind), "slow receiver behind {} ms", behind / MS);
     assert_eq!(fast.engine.status().streams[0].behind_ns, 0);
     slow.shutdown();
     fast.shutdown();
@@ -193,6 +214,37 @@ fn remote_set_offset_applies_and_persists() {
     // And it is gossiped back to the master.
     assert!(wait_until(Duration::from_secs(3), || m.engine.status().peers[0].extra_latency_ns == 25 * MS));
     r.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn layout_warning_clears_when_the_cable_is_reconfigured() {
+    // Broadcasting a stereo CABLE Input to a 7.1 monitor warns; after the user sets the cable to
+    // 7.1 (Windows ends the capture, SoundSync reopens it) the warning must go away.
+    let seven_one = StreamFormat { sample_rate: 48_000, channels: 8, channel_mask: 0x63F };
+    let m = spawn_with(
+        Spec::new("m"),
+        |c: &mut Config| {
+            c.master.capture_device = "CABLE Input".into();
+            c.master.monitor_device = "TV".into();
+        },
+        |h| {
+            h.add_source(pulse_source("CABLE Input", 0));
+            let mut tv = output("TV", 0.0, 10, 0);
+            tv.format = seven_one;
+            h.add_output(tv);
+        },
+    );
+    let mismatch = |n: &TestNode| n.engine.status().warnings.iter().any(|w| w.contains("Stereo → 7.1"));
+    m.engine.command(Command::SetBroadcast(true));
+    assert!(wait_until(Duration::from_secs(3), || mismatch(&m)), "{:?}", m.engine.status().warnings);
+    m.host.remove_device("CABLE Input");
+    m.host.set_source_format("CABLE Input", seven_one);
+    m.host.readd_device("CABLE Input");
+    assert!(wait_until(Duration::from_secs(3), || m.engine.status().capture.as_ref().is_some_and(|c| c.format.channels == 8)));
+    sleep(Duration::from_millis(300));
+    let st = m.engine.status();
+    assert!(!st.warnings.iter().any(|w| w.contains(" → ")), "stale layout warning: {:?}", st.warnings);
     m.shutdown();
 }
 
