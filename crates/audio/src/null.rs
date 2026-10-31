@@ -1,0 +1,158 @@
+//! Timer-driven output that discards audio, plus the thread-backed stream handle shared by the
+//! null and fake backends.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use crate::{Nanos, RenderCallback, RenderTiming, StreamFormat, StreamHandle};
+
+const NULL_LATENCY_NS: Nanos = 10_000_000;
+
+/// A stream backed by one thread that runs until `stop` is set.
+pub(crate) struct ThreadStream {
+    stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    format: StreamFormat,
+    latency_ns: Nanos,
+}
+
+impl ThreadStream {
+    pub(crate) fn spawn(
+        name: &str,
+        format: StreamFormat,
+        latency_ns: Nanos,
+        body: impl FnOnce(Arc<AtomicBool>, Arc<AtomicBool>) + Send + 'static,
+    ) -> ThreadStream {
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let (s, a) = (stop.clone(), alive.clone());
+        let thread = std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                body(s, a.clone());
+                a.store(false, Ordering::Release);
+            })
+            .expect("spawn audio thread");
+        ThreadStream { stop, alive, thread: Some(thread), format, latency_ns }
+    }
+}
+
+/// Result a device thread reports once it has opened (or failed to open) its device.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) type InitResult = Result<(StreamFormat, Nanos), crate::AudioError>;
+
+impl ThreadStream {
+    /// Spawns a device thread that first opens the device and reports the result through `init`
+    /// (format and latency), then runs until `stop`. Returns the open error, if any.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn spawn_with_init(
+        name: &str,
+        body: impl FnOnce(std::sync::mpsc::SyncSender<InitResult>, Arc<AtomicBool>) + Send + 'static,
+    ) -> Result<ThreadStream, crate::AudioError> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InitResult>(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let (s, a) = (stop.clone(), alive.clone());
+        let thread = std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                body(tx, s);
+                a.store(false, Ordering::Release);
+            })
+            .map_err(|e| crate::AudioError::Os(format!("spawn {e}")))?;
+        match rx.recv() {
+            Ok(Ok((format, latency_ns))) => Ok(ThreadStream { stop, alive, thread: Some(thread), format, latency_ns }),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                Err(e)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(crate::AudioError::Os("audio thread exited during start".into()))
+            }
+        }
+    }
+}
+
+impl StreamHandle for ThreadStream {
+    fn format(&self) -> StreamFormat {
+        self.format
+    }
+    fn latency_ns(&self) -> Nanos {
+        self.latency_ns
+    }
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for ThreadStream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Calls `cb` on a 10 ms cadence as if a device played `format` with 10 ms of latency.
+pub fn open_null_output(now: Arc<dyn Fn() -> Nanos + Send + Sync>, format: StreamFormat, mut cb: Box<dyn RenderCallback>) -> crate::Stream {
+    Box::new(ThreadStream::spawn("soundsync-null-out", format, NULL_LATENCY_NS, move |stop, _alive| {
+        let ch = format.channels.max(1) as usize;
+        let rate = format.sample_rate.max(1) as u64;
+        let period = (rate / 100) as i64;
+        let max_frames = (rate / 10) as usize;
+        let mut buf = vec![0.0f32; max_frames * ch];
+        let start = now();
+        let mut written: i64 = 0;
+        while !stop.load(Ordering::Acquire) {
+            let t = now();
+            let elapsed = ((t - start) as i128 * rate as i128 / 1_000_000_000) as i64;
+            let target = elapsed + period;
+            if target > written {
+                let n = ((target - written) as usize).min(max_frames);
+                let dac = start + NULL_LATENCY_NS + (written as i128 * 1_000_000_000 / rate as i128) as Nanos;
+                let out = &mut buf[..n * ch];
+                out.fill(0.0);
+                cb.render(out, format, RenderTiming { now_ns: t, dac_time_ns: dac });
+                written += n as i64;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct Count(Arc<Mutex<(usize, Vec<RenderTiming>)>>);
+    impl RenderCallback for Count {
+        fn render(&mut self, out: &mut [f32], format: StreamFormat, t: RenderTiming) {
+            let mut g = self.0.lock().unwrap();
+            g.0 += out.len() / format.channels as usize;
+            g.1.push(t);
+        }
+    }
+
+    #[test]
+    fn null_output_calls_back_at_real_time_rate() {
+        let seen = Arc::new(Mutex::new((0usize, Vec::new())));
+        let start = std::time::Instant::now();
+        let now: Arc<dyn Fn() -> Nanos + Send + Sync> = Arc::new(move || start.elapsed().as_nanos() as Nanos + 1_000_000_000);
+        let fmt = StreamFormat { sample_rate: 48_000, channels: 2, channel_mask: 3 };
+        let stream = open_null_output(now, fmt, Box::new(Count(seen.clone())));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        drop(stream);
+        let g = seen.lock().unwrap();
+        // One period is buffered ahead, so up to 10 ms extra.
+        assert!((47_000..=50_000).contains(&g.0), "frames {}", g.0);
+        let lead = g.1.last().map(|t| t.dac_time_ns - t.now_ns).unwrap();
+        assert!((0..=20_000_000).contains(&lead), "lead {lead}");
+        assert!(g.1.windows(2).all(|w| w[1].dac_time_ns > w[0].dac_time_ns));
+    }
+}

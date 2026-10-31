@@ -1,0 +1,51 @@
+---
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: pwsh scripts/build-windows.ps1 -SkipTests
+      - name: Upload (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoundSync-windows-x64
+          path: dist/SoundSync-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/bundle-macos.sh
+      # The ditto zip keeps the bundle's permissions and signature; artifact upload alone would not.
+      - name: Upload (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoundSync-macos-universal
+          path: dist/SoundSync-macos-universal.zip
+          if-no-files-found: error

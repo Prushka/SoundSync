@@ -1,0 +1,40 @@
+[package]
+name = "soundsync"
+description = "SoundSync: synchronized multi-room audio over the LAN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "soundsync"
+path = "src/main.rs"
+
+[dependencies]
+soundsync-core.workspace = true
+soundsync-audio.workspace = true
+soundsync-engine.workspace = true
+ctrlc.workspace = true
+thiserror.workspace = true
+crossbeam-channel.workspace = true
+png = "0.18"
+eframe.workspace = true
+tray-icon.workspace = true
+raw-window-handle = "0.6"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[build-dependencies]
+ico = "0.6"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_Shell", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_System_LibraryLoader"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

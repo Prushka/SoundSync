@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.soundsync.app</string>
+    <key>CFBundleName</key>
+    <string>SoundSync</string>
+    <key>CFBundleDisplayName</key>
+    <string>SoundSync</string>
+    <key>CFBundleExecutable</key>
+    <string>soundsync</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>CFBundleIconFile</key>
+    <string>SoundSync</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SoundSync uses the microphone only during speaker sync calibration.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SoundSync finds and streams audio to other SoundSync devices on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_soundsync._udp</string>
+    </array>
+</dict>
+</plist>

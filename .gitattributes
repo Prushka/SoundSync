@@ -1,0 +1,3 @@
+# Embedded with include_str! and compared line by line in tests; shell scripts run on macOS.
+assets/*.in text eol=lf
+*.sh text eol=lf

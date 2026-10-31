@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.99"
+
+[workspace.dependencies]
+soundsync-core = { path = "crates/core" }
+soundsync-audio = { path = "crates/audio" }
+soundsync-engine = { path = "crates/engine" }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1.1", features = ["alloc"] }
+hmac = "0.13"
+sha2 = "0.11"
+thiserror = "2"
+anyhow = "1"
+toml = "1.1"
+directories = "6"
+gethostname = "1.1"
+rand = "0.10"
+realfft = "3.5"
+rubato = "5"
+rtrb = "0.4"
+mdns-sd = "0.21.6"
+socket2 = { version = "0.6", features = ["all"] }
+if-addrs = "0.15"
+arc-swap = "1.9"
+crossbeam-channel = "0.5"
+parking_lot = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+clap = { version = "4.6", features = ["derive"] }
+ctrlc = "3.5"
+wasapi = "0.26"
+windows = "0.62"
+windows-core = "0.62"
+coreaudio-rs = "0.14"
+objc2-core-audio = "0.3"
+objc2-core-audio-types = "0.3"
+eframe = "0.37"
+egui = "0.37"
+tray-icon = "0.26"
+
+# Keep DSP dependencies fast in debug test runs.
+[profile.dev.package.rubato]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3

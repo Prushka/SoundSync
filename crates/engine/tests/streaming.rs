@@ -1,0 +1,277 @@
+mod common;
+
+use std::thread::sleep;
+use std::time::Duration;
+
+use common::*;
+use soundsync_audio::fake::FakeClock;
+use soundsync_core::config::Config;
+use soundsync_core::{MasterMode, StreamFormat};
+use soundsync_engine::Command;
+
+fn virtual_master(name: &str, monitor: &str) -> TestNode {
+    spawn_with(
+        Spec::new(name),
+        |c: &mut Config| {
+            c.master.capture_device = "CABLE Input".into();
+            c.master.monitor_device = monitor.into();
+        },
+        |h| {
+            h.add_source(pulse_source("CABLE Input", 0));
+            h.add_output(output("TV", 50.0, 15, 0));
+        },
+    )
+}
+
+fn receiver(name: &str, clock: FakeClock, master: &TestNode, device: &str, ppm: f64, reported_ms: i64, impair: Option<soundsync_engine::NetImpair>) -> TestNode {
+    let dev = device.to_string();
+    spawn_with(
+        Spec { clock, peers: &[master], impair, ..Spec::new(name) },
+        move |c: &mut Config| c.playback.output_device = dev,
+        |h| h.add_output(output(device, ppm, reported_ms, 0)),
+    )
+}
+
+#[test]
+fn virtual_mode_three_outputs_in_sync() {
+    let t0 = now();
+    let m = virtual_master("m", "TV");
+    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", -120.0, 40, None);
+    let r2 = receiver("r2", FakeClock { offset_ns: 7 * MS, skew_ppm: 0.0 }, &m, "Speaker", 80.0, 5, None);
+    m.engine.command(Command::SetBroadcast(true));
+    sleep(Duration::from_secs(6));
+    let d = m.engine.status().delay_ns.expect("group delay chosen");
+    sleep(Duration::from_secs(4));
+    let st = m.engine.status();
+    assert!(st.broadcasting);
+    assert_eq!(st.delay_ns, Some(d), "delay must be stable after warm-up");
+    assert_eq!(d % (5 * MS), 0);
+    assert!(d >= 45 * MS, "D {} ms", d / MS);
+    assert_in_sync(&m, "CABLE Input", &[(&m, "TV", 0), (&r1, "Laptop", 0), (&r2, "Speaker", 0)], &[d], at(t0, 6.5), at(t0, 9.5), MS, false);
+    r2.shutdown();
+    r1.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn stream_start_delay_covers_known_receivers() {
+    // Receivers subscribe only after hearing about the new stream; the first group delay must
+    // already cover them, or they play behind until the next gossip round raises it.
+    let m = virtual_master("m", "TV");
+    let slow = receiver("slow", FakeClock::default(), &m, "Bluetooth", 0.0, 100, None);
+    assert!(wait_until(Duration::from_secs(5), || m.engine.status().peers.iter().any(|p| p.output.is_some())), "the receiver's state arrived");
+    m.engine.command(Command::SetBroadcast(true));
+    assert!(wait_until(Duration::from_secs(1), || m.engine.status().delay_ns.is_some()));
+    let first = m.engine.status().delay_ns.unwrap();
+    assert!(first >= 100 * MS, "initial D {} ms ignores the 100 ms receiver", first / MS);
+    slow.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn receivers_start_playing_promptly() {
+    // A new stream is announced and subscribed to at once, not on the next 1 s gossip round.
+    let m = virtual_master("m", "TV");
+    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
+    assert!(wait_until(Duration::from_secs(3), || r1.engine.status().peers.iter().all(|p| p.clock_offset_ns.is_some()) && !r1.engine.status().peers.is_empty()));
+    for round in 0..3 {
+        let start = std::time::Instant::now();
+        m.engine.command(Command::SetBroadcast(true));
+        let playing = || r1.engine.status().streams.iter().any(|s| s.state == soundsync_core::player::PlayState::Playing);
+        assert!(wait_until(Duration::from_secs(3), playing), "round {round}: never played");
+        let took = start.elapsed();
+        assert!(took < Duration::from_millis(600), "round {round}: playing after {took:?}");
+        m.engine.command(Command::SetBroadcast(false));
+        assert!(wait_until(Duration::from_secs(3), || r1.engine.status().streams.is_empty()), "round {round}: stream not dropped");
+    }
+    r1.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn virtual_mode_survives_loss_and_reorder() {
+    let t0 = now();
+    let m = virtual_master("m", "TV");
+    let impair = soundsync_engine::NetImpair { loss: 0.01, reorder: 0.02, jitter_ns: 2 * MS, seed: 9 };
+    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", -120.0, 40, Some(impair));
+    m.engine.command(Command::SetBroadcast(true));
+    let delays = DelayLog::record(&m, Duration::from_secs(10));
+    assert_in_sync(&m, "CABLE Input", &[(&r1, "Laptop", 0)], &delays.during(at(t0, 6.5), at(t0, 9.5)), at(t0, 6.5), at(t0, 9.5), MS, true);
+    let st = r1.engine.status();
+    assert_eq!(st.streams.len(), 1);
+    assert!(st.streams[0].lost_frames > 0, "1% loss must show up in the stats");
+    r1.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn direct_mode_reports_behind() {
+    let t0 = now();
+    // A TV-like master: Windows plays the captured audio 60 ms after its loopback timestamp.
+    let m = spawn_with(
+        Spec::new("m"),
+        |c: &mut Config| {
+            c.master.mode = MasterMode::Direct;
+            c.master.capture_device = "Speakers".into();
+            c.playback.output_device = "Speakers".into();
+        },
+        |h| h.add_source(pulse_source("Speakers", 60 * MS)),
+    );
+    let fast = receiver("fast", FakeClock::default(), &m, "Kitchen", 0.0, 5, None);
+    let slow = receiver("slow", FakeClock::default(), &m, "Headphones", 0.0, 100, None);
+    m.engine.command(Command::SetBroadcast(true));
+    sleep(Duration::from_secs(8));
+    let st = m.engine.status();
+    assert_eq!(st.delay_ns, Some(60 * MS), "direct mode presents at the master's own output time");
+    assert!(st.warnings.iter().any(|w| w.contains("echo guard")), "{:?}", st.warnings);
+    // The fast receiver matches what Windows plays on the master.
+    let emitted: Vec<_> = m.host.onsets("Speakers");
+    assert!(emitted.len() > 10);
+    assert_in_sync(&m, "Speakers", &[(&fast, "Kitchen", 0)], &[60 * MS], at(t0, 4.5), at(t0, 7.5), MS, false);
+    let behind = slow.engine.status().streams[0].behind_ns;
+    assert!((55 * MS..=100 * MS).contains(&behind), "slow receiver behind {} ms", behind / MS);
+    assert_eq!(fast.engine.status().streams[0].behind_ns, 0);
+    slow.shutdown();
+    fast.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn auto_delay_increases_when_slow_receiver_joins() {
+    let t0 = now();
+    let m = virtual_master("m", "TV");
+    let fast = receiver("fast", FakeClock::default(), &m, "Speaker", 0.0, 5, None);
+    m.engine.command(Command::SetBroadcast(true));
+    sleep(Duration::from_secs(4));
+    let before = m.engine.status().delay_ns.unwrap();
+    let slow = receiver("slow", FakeClock::default(), &m, "Bluetooth", 0.0, 150, None);
+    assert!(wait_until(Duration::from_secs(8), || m.engine.status().delay_ns.unwrap() >= 155 * MS), "D stayed at {} ms", m.engine.status().delay_ns.unwrap() / MS);
+    // The first estimate comes from the device lead; the measured requirement may refine it.
+    let mut d = m.engine.status().delay_ns.unwrap();
+    let mut stable_since = now();
+    while now() - stable_since < 3_000_000_000 {
+        sleep(Duration::from_millis(100));
+        let cur = m.engine.status().delay_ns.unwrap();
+        if cur != d {
+            d = cur;
+            stable_since = now();
+        }
+        assert!(now() - t0 < 30_000_000_000, "group delay never settled (last {} ms)", d / MS);
+    }
+    assert!(d > before && d >= 155 * MS);
+    sleep(Duration::from_millis(500));
+    let from = stable_since + 1_000_000_000;
+    assert_in_sync(&m, "CABLE Input", &[(&m, "TV", 0), (&fast, "Speaker", 0), (&slow, "Bluetooth", 0)], &[d], from, now() - d - 50 * MS, MS, false);
+    slow.shutdown();
+    fast.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn master_leaving_removes_stream() {
+    let m = virtual_master("m", "TV");
+    let r = receiver("r", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
+    m.engine.command(Command::SetBroadcast(true));
+    assert!(wait_until(Duration::from_secs(6), || r.engine.status().streams.len() == 1));
+    m.engine.command(Command::SetBroadcast(false));
+    assert!(wait_until(Duration::from_secs(4), || r.engine.status().streams.is_empty()));
+    assert!(!m.engine.status().broadcasting);
+    r.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn remote_set_offset_applies_and_persists() {
+    let m = virtual_master("m", "TV");
+    let r = receiver("r", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
+    assert!(wait_until(Duration::from_secs(4), || m.engine.status().peers.len() == 1));
+    let rid = r.engine.status().node_id;
+    m.engine.command(Command::SetExtraLatency { node: rid, ns: 25 * MS });
+    assert!(wait_until(Duration::from_secs(2), || r.engine.status().extra_latency_ns == 25 * MS));
+    let saved = Config::load_or_create(&r.config_path()).unwrap().config;
+    assert_eq!(saved.playback.extra_latency_ms, 25.0);
+    // And it is gossiped back to the master.
+    assert!(wait_until(Duration::from_secs(3), || m.engine.status().peers[0].extra_latency_ns == 25 * MS));
+    r.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn layout_mismatch_warns() {
+    let m = spawn_with(
+        Spec::new("m"),
+        |c: &mut Config| {
+            c.master.capture_device = "CABLE Input".into();
+            c.master.monitor_device = "null".into();
+        },
+        |h| {
+            let mut s = pulse_source("CABLE Input", 0);
+            s.format = StreamFormat { sample_rate: 48_000, channels: 6, channel_mask: 0x3F };
+            h.add_source(s);
+        },
+    );
+    let r = receiver("r", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
+    m.engine.command(Command::SetBroadcast(true));
+    assert!(wait_until(Duration::from_secs(6), || r.engine.status().streams.first().is_some_and(|s| s.layout_warning.is_some())));
+    let st = r.engine.status();
+    assert_eq!(st.streams[0].layout_warning.as_deref(), Some("5.1 → Stereo"));
+    assert!(st.warnings.iter().any(|w| w.contains("5.1 → Stereo")), "{:?}", st.warnings);
+    r.shutdown();
+    m.shutdown();
+}
+
+
+#[test]
+fn spoofed_subscribe_gets_no_audio() {
+    // A SUBSCRIBE claiming a known peer's id from another address must not redirect the stream
+    // there (it would make the master an amplifier: ~12 Mbit/s for a few bytes).
+    use soundsync_core::protocol::{Control, GroupKey, MAX_DATAGRAM, Packet, encode};
+    let m = virtual_master("m", "TV");
+    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
+    m.engine.command(Command::SetBroadcast(true));
+    assert!(wait_until(Duration::from_secs(5), || r1.engine.status().streams.iter().any(|s| s.state == soundsync_core::player::PlayState::Playing)));
+    let stream_id = r1.engine.status().streams[0].stream_id;
+    let victim = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    victim.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let key = GroupKey::derive("test", ""); // the test nodes' group
+    let mut buf = [0u8; MAX_DATAGRAM];
+    let n = encode(r1.engine.status().node_id, &Packet::Control(Control::Subscribe { stream_id }), &key, &mut buf).unwrap();
+    let mut received = 0;
+    let end = std::time::Instant::now() + Duration::from_millis(1500);
+    let mut rx = [0u8; 2048];
+    while std::time::Instant::now() < end {
+        victim.send_to(&buf[..n], m.engine.local_addr()).unwrap();
+        while victim.recv_from(&mut rx).is_ok() {
+            received += 1;
+        }
+    }
+    assert_eq!(received, 0, "the master streamed to an address that never handshook");
+    r1.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn oversized_datagrams_do_not_stall_the_receiver() {
+    // Anyone on the LAN can send junk; datagrams larger than SoundSync ever sends must be
+    // dropped without slowing down the receive loop.
+    let m = virtual_master("m", "TV");
+    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
+    m.engine.command(Command::SetBroadcast(true));
+    let playing = |n: &TestNode| n.engine.status().streams.iter().any(|s| s.state == soundsync_core::player::PlayState::Playing);
+    assert!(wait_until(Duration::from_secs(5), || playing(&r1)));
+    sleep(Duration::from_millis(500));
+    let lost_before = r1.engine.status().streams[0].lost_frames;
+    let junk = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let big = vec![0u8; 8_000];
+    for _ in 0..400 {
+        let _ = junk.send_to(&big, r1.engine.local_addr());
+        sleep(Duration::from_millis(2));
+    }
+    sleep(Duration::from_millis(500));
+    let st = r1.engine.status();
+    let lost = st.streams[0].lost_frames - lost_before;
+    assert!(lost < 4_800, "{lost} frames lost while junk arrived");
+    assert!(playing(&r1), "{:?}", st.streams);
+    r1.shutdown();
+    m.shutdown();
+}

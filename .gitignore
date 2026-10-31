@@ -1,0 +1,5 @@
+/target/
+/dist/
+
+# Claude Code session lock (machine-local)
+/.claude/*.lock
