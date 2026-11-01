@@ -232,9 +232,10 @@ pub fn launch(target: &Target, args: &[OsString]) -> std::io::Result<()> {
     }
 }
 
-/// Whether the previous copy was just replaced (it waits in `.soundsync-update/old/`).
+/// Whether the previous copy was just replaced (it waits in `.soundsync-update/old/`; a swap that
+/// was rolled back leaves that folder empty).
 pub fn was_just_updated(target: &Target) -> bool {
-    target.staging().join("old").exists()
+    target.staging().join("old").join(target.file_name()).exists()
 }
 
 /// Deletes `.soundsync-update`, retrying while the old copy is still exiting (its exe stays
@@ -336,6 +337,25 @@ mod tests {
     }
 
     #[test]
+    fn a_swap_that_was_undone_or_failed_is_not_reported_as_an_update() {
+        let dir = temp("undone");
+        let exe = dir.join("soundsync.exe");
+        std::fs::write(&exe, "old").unwrap();
+        let target = Target::Exe(exe.clone());
+        let new = target.staging().join("new").join("soundsync.exe");
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::fs::write(&new, "new").unwrap();
+        let swapped = swap(&Staged { target: target.clone(), new: new.clone() }).unwrap();
+        assert!(was_just_updated(&target), "the old copy waits in old/");
+        swapped.undo().unwrap(); // the new build could not be started
+        assert!(!was_just_updated(&target), "the old copy is back: nothing was updated");
+        std::fs::remove_file(&new).unwrap();
+        assert!(swap(&Staged { target: target.clone(), new }).is_err());
+        assert!(!was_just_updated(&target), "a swap that was rolled back is not an update");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn relaunch_keeps_the_window_hidden_when_it_was() {
         let started = args(&["--instance", "b", "--show", "--bind", "127.0.0.1"]);
         assert_eq!(relaunch_args(&started, false, Os::Windows), args(&["--instance", "b", "--bind", "127.0.0.1"]));
@@ -355,6 +375,7 @@ mod tests {
         assert!(clean_up(&target, Duration::from_secs(1)));
         assert!(!target.staging().exists());
         std::fs::create_dir_all(target.staging().join("old")).unwrap();
+        std::fs::write(target.staging().join("old").join("soundsync.exe"), "the copy that was replaced").unwrap();
         assert!(was_just_updated(&target));
         assert!(clean_up(&target, Duration::from_secs(1)));
         assert!(clean_up(&target, Duration::from_secs(1)), "nothing to clean is fine");

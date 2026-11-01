@@ -243,7 +243,8 @@ Paths:
 - **Restart:** `on_exit` stops the engine, drops the instance guard, ends the log session, and starts the new
   copy with the same arguments (`--show` if the window was open; `--background` on macOS if it was hidden).
   If that start fails, it swaps back and starts the old copy. The new copy shows "Updated to SoundSync …"
-  when `old/` exists and deletes `.soundsync-update`, retrying for 20 s while the old process exits.
+  when the old copy waits in `old/` (a rolled-back swap leaves `old/` empty) and deletes
+  `.soundsync-update`, retrying for 20 s while the old process exits.
 - **Log marker:** `.running` holds the process id. The new copy archives `soundsync.log` while the old one
   is still exiting, so a process only removes its own marker, and the old one removes it before the
   relaunch (otherwise the old log is labelled `-recovered` and the new session loses crash detection).
