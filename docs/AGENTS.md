@@ -399,6 +399,7 @@ review rulings are recorded in the local ledger. The decisions most likely to ma
 | `c2401eb` | Volume matching, remote volume and mics, device refresh, TV wake-up noise, silence note, protocol v2 with version warning. |
 | `ed9b05d` | This guide. |
 | `fcaec3d` | CI runs tests one at a time (the macOS job failed two timing tests from tests running in parallel on 3 vCPUs). |
+| `7db1a22` | Release per push to `main` (tag `v<version>-build.<n>`, both zips, notes from commits); build number and commit stamped into the app. |
 
 ## Open items and known limitations
 
