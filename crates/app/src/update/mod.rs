@@ -2,4 +2,5 @@
 //! the copy that is running (the exe on Windows, SoundSync.app on macOS).
 
 pub mod fetch;
+pub mod install;
 pub mod release;
