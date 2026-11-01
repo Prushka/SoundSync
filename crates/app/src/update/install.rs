@@ -15,7 +15,7 @@ use crate::macos_bundle::bundle_of;
 /// Next to the running copy (same volume, so moving is a rename).
 pub const STAGING: &str = ".soundsync-update";
 
-const DEV_BUILD: &str = "This is a development build; it doesn't update itself.";
+pub const DEV_BUILD: &str = "This is a development build; it doesn't update itself.";
 const NOT_A_BUNDLE: &str = "Only SoundSync.app updates itself.";
 const TRANSLOCATED: &str = "Move SoundSync.app to Applications and open it from there to update it.";
 /// Windows Defender may scan a new exe before it first runs.
