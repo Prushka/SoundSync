@@ -63,23 +63,37 @@ pub fn rotate_logs(dir: &Path, now: SystemTime) -> io::Result<RotateOutcome> {
 }
 
 /// The `.running` file: present while a session runs, removed only on a clean exit (a drop
-/// during a panic leaves it, so the next start archives that log as `-recovered`).
+/// during a panic leaves it, so the next start archives that log as `-recovered`). It holds the
+/// process id, because after an update the new copy starts before the old one has exited.
 pub struct RunMarker(PathBuf);
 
 impl RunMarker {
     pub fn create(dir: &Path) -> io::Result<RunMarker> {
         let path = dir.join(MARKER);
-        std::fs::write(&path, b"")?;
+        std::fs::write(&path, std::process::id().to_string())?;
         Ok(RunMarker(path))
+    }
+}
+
+/// Removes the marker if this process wrote it, not one a newer session wrote since.
+fn remove_own_marker(path: &Path) {
+    if std::fs::read_to_string(path).is_ok_and(|pid| pid.trim() == std::process::id().to_string()) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
 impl Drop for RunMarker {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            let _ = std::fs::remove_file(&self.0);
+            remove_own_marker(&self.0);
         }
     }
+}
+
+/// Marks this session as cleanly ended now, before starting the updated copy (which archives the
+/// log while this process is still exiting).
+pub fn end_session(dir: &Path) {
+    remove_own_marker(&dir.join(MARKER));
 }
 
 /// Keeps logging alive; on drop it marks the session as cleanly ended.
@@ -199,6 +213,32 @@ mod tests {
             let _m = RunMarker::create(&d).unwrap();
         }
         assert!(!d.join(".running").exists(), "normal drop marks a clean exit");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_marker_the_next_session_took_over_is_left_alone() {
+        let d = dir("handover");
+        {
+            let _m = RunMarker::create(&d).unwrap();
+            std::fs::write(d.join(".running"), "4242").unwrap(); // the updated copy started and wrote its own
+        }
+        assert_eq!(std::fs::read_to_string(d.join(".running")).unwrap(), "4242", "the new session's marker survives the old one's exit");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn ending_the_session_before_a_restart_is_a_clean_exit() {
+        let d = dir("restart");
+        std::fs::write(d.join("soundsync.log"), "old session").unwrap();
+        let m = RunMarker::create(&d).unwrap();
+        end_session(&d);
+        let out = rotate_logs(&d, at(1_793_428_592)).unwrap(); // the new copy starts while the old one is still exiting
+        assert!(!out.previous_crashed);
+        assert_eq!(out.archived.unwrap().file_name().unwrap(), "soundsync-20261031-063632.log");
+        std::fs::write(d.join(".running"), "4242").unwrap();
+        drop(m);
+        assert!(d.join(".running").exists(), "the old session's exit leaves the new session's marker");
         let _ = std::fs::remove_dir_all(d);
     }
 

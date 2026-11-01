@@ -5,7 +5,7 @@
 
 use crossbeam_channel::Sender;
 use eframe::egui;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use super::format::tray_status_line;
@@ -18,8 +18,12 @@ pub enum Action {
     ToggleBroadcast,
     ToggleMute,
     ToggleSyncTest,
+    InstallUpdate,
     Quit,
 }
+
+/// The update item comes and goes, so it has a fixed id rather than one captured at start.
+const UPDATE_ID: &str = "soundsync-install-update";
 
 pub struct Tray {
     icon: TrayIcon,
@@ -28,6 +32,9 @@ pub struct Tray {
     mute: CheckMenuItem,
     sync: CheckMenuItem,
     last_line: String,
+    menu: Menu,
+    /// "Update to build N", while there is one to install.
+    update: Option<(u32, MenuItem)>,
 }
 
 impl Tray {
@@ -70,6 +77,8 @@ impl Tray {
                 Action::ToggleSyncTest
             } else if e.id == ids.4 {
                 Action::Quit
+            } else if e.id == UPDATE_ID {
+                Action::InstallUpdate
             } else {
                 return;
             };
@@ -89,12 +98,12 @@ impl Tray {
         }));
 
         let icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
+            .with_menu(Box::new(menu.clone()))
             .with_menu_on_left_click(false)
             .with_tooltip("SoundSync")
             .with_icon(Icon::from_rgba(icon_rgba(32), 32, 32)?)
             .build()?;
-        Ok(Tray { icon, status, broadcast, mute, sync, last_line: String::new() })
+        Ok(Tray { icon, status, broadcast, mute, sync, last_line: String::new(), menu, update: None })
     }
 
     pub fn update(&mut self, st: &Status) {
@@ -109,5 +118,23 @@ impl Tray {
         }
         self.mute.set_checked(st.muted);
         self.sync.set_checked(st.sync_test);
+    }
+
+    /// Shows "Update to build N" above the last separator while `build` is installable.
+    pub fn set_update(&mut self, build: Option<u32>) {
+        if self.update.as_ref().map(|(n, _)| *n) == build {
+            return;
+        }
+        if let Some((_, item)) = self.update.take() {
+            let _ = self.menu.remove(&item);
+        }
+        if let Some(n) = build {
+            let item = MenuItem::with_id(MenuId::new(UPDATE_ID), format!("Update to build {n}"), true, None);
+            let before_quit = self.menu.items().len().saturating_sub(2);
+            if let Err(e) = self.menu.insert(&item, before_quit) {
+                tracing::warn!("cannot add the update item to the tray menu: {e}");
+            }
+            self.update = Some((n, item));
+        }
     }
 }

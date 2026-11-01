@@ -4,6 +4,10 @@ use soundsync_core::player::PlayState;
 use soundsync_core::{MasterMode, Nanos, Role};
 use soundsync_engine::{Status, StreamStatus};
 
+use std::time::SystemTime;
+
+use crate::update::UpdateState;
+
 pub fn fmt_ms(ns: Nanos) -> String {
     format!("{:.1} ms", ns as f64 / 1e6)
 }
@@ -68,9 +72,83 @@ pub fn tray_status_line(st: &Status) -> String {
     if st.peers.is_empty() { "Idle · no other devices".into() } else { format!("Idle · {} devices", st.peers.len() + 1) }
 }
 
+fn percent(received: u64, total: u64) -> u64 {
+    (received * 100).checked_div(total).unwrap_or(0).min(100)
+}
+
+/// The update line under the header (every tab), when there is something to act on.
+pub fn update_line(s: &UpdateState) -> Option<String> {
+    match s {
+        UpdateState::Available(r) => {
+            Some(format!("SoundSync build {} is available. Update every device in the group: different versions may not be able to talk.", r.build))
+        }
+        UpdateState::Downloading { release, received, total } => Some(format!("Downloading build {}… {}%", release.build, percent(*received, *total))),
+        UpdateState::Ready { release, .. } | UpdateState::Restarting(release) => Some(format!("Restarting into build {}…", release.build)),
+        UpdateState::Failed { error, release: Some(r) } => Some(format!("Update to build {} failed: {error}", r.build)),
+        _ => None,
+    }
+}
+
+/// What Settings ▸ Updates says.
+pub fn update_status(s: &UpdateState, now: SystemTime) -> String {
+    match s {
+        UpdateState::Unavailable(why) => why.clone(),
+        UpdateState::Idle => "Not checked yet".into(),
+        UpdateState::Checking => "Checking for updates…".into(),
+        UpdateState::UpToDate { checked } => {
+            let mins = now.duration_since(*checked).unwrap_or_default().as_secs() / 60;
+            match mins {
+                0 => "Up to date (checked just now)".into(),
+                1..60 => format!("Up to date (checked {mins} min ago)"),
+                _ => format!("Up to date (checked {} h ago)", mins / 60),
+            }
+        }
+        UpdateState::Available(r) => format!("Build {} is available", r.build),
+        UpdateState::Failed { error, .. } => error.clone(),
+        busy => update_line(busy).unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::update::release::{Asset, Release};
+
+    fn build(n: u32) -> Release {
+        let asset = Asset { name: "SoundSync-windows-x64.zip".into(), url: "https://example/x.zip".into(), size: 10 << 20, sha256: [0; 32] };
+        Release { tag: format!("v0.1.0-build.{n}"), title: format!("SoundSync 0.1.0 (build {n})"), build: n, page_url: "https://example/release".into(), asset }
+    }
+
+    #[test]
+    fn update_line_names_the_build_and_the_group() {
+        assert_eq!(
+            update_line(&UpdateState::Available(build(9))).as_deref(),
+            Some("SoundSync build 9 is available. Update every device in the group: different versions may not be able to talk.")
+        );
+        let downloading = UpdateState::Downloading { release: build(9), received: 5 << 20, total: 10 << 20 };
+        assert_eq!(update_line(&downloading).as_deref(), Some("Downloading build 9… 50%"));
+        let failed = UpdateState::Failed { error: "GitHub answered 500".into(), release: Some(build(9)) };
+        assert_eq!(update_line(&failed).as_deref(), Some("Update to build 9 failed: GitHub answered 500"));
+        assert_eq!(update_line(&UpdateState::Restarting(build(9))).as_deref(), Some("Restarting into build 9…"));
+        for quiet in [UpdateState::Idle, UpdateState::Checking, UpdateState::UpToDate { checked: SystemTime::UNIX_EPOCH }, UpdateState::Unavailable("dev".into())] {
+            assert_eq!(update_line(&quiet), None, "{quiet:?}");
+        }
+        assert_eq!(update_line(&UpdateState::Failed { error: "offline".into(), release: None }), None, "a failed check is shown in Settings only");
+    }
+
+    #[test]
+    fn update_status_says_what_the_updater_is_doing() {
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10_000);
+        let ago = |secs: u64| UpdateState::UpToDate { checked: now - std::time::Duration::from_secs(secs) };
+        assert_eq!(update_status(&ago(20), now), "Up to date (checked just now)");
+        assert_eq!(update_status(&ago(180), now), "Up to date (checked 3 min ago)");
+        assert_eq!(update_status(&ago(7_300), now), "Up to date (checked 2 h ago)");
+        assert_eq!(update_status(&UpdateState::Unavailable("This is a development build; it doesn't update itself.".into()), now), "This is a development build; it doesn't update itself.");
+        assert_eq!(update_status(&UpdateState::Checking, now), "Checking for updates…");
+        assert_eq!(update_status(&UpdateState::Idle, now), "Not checked yet");
+        assert_eq!(update_status(&UpdateState::Available(build(9)), now), "Build 9 is available");
+        assert_eq!(update_status(&UpdateState::Failed { error: "offline".into(), release: None }, now), "offline");
+    }
 
     fn result(delta_ms: f64, snr_db: f32, spread_ms: f64, heard: u8, sweeps: u8) -> soundsync_core::calib::CalibResult {
         soundsync_core::calib::CalibResult {

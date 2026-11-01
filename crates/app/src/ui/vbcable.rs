@@ -39,13 +39,6 @@ impl Default for CableHelper {
     }
 }
 
-fn open_url(url: &str) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(url).spawn();
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
-}
-
 /// Puts back the default speakers saved before the VB-CABLE install; returns the notice.
 fn finish_setup(guard: Option<&DefaultSwitchGuard>) -> String {
     match guard.map(|g| g.restore_after_setup()) {
@@ -83,7 +76,7 @@ pub fn panel(app: &mut SoundSyncApp, ui: &mut egui::Ui, config: &Config, mode: M
             ui.horizontal(|ui| {
                 if ui.button("Set up VB-CABLE…").clicked() {
                     let saved = app.defaults_guard.as_ref().map(|g| g.save_for_setup());
-                    open_url(VB_URL);
+                    super::panels::open_url(VB_URL);
                     app.cable.waiting = true;
                     app.notice = Some(match saved {
                         Some(Err(e)) => format!("Could not save your current default speakers ({e}); install VB-CABLE, then check Sound settings."),

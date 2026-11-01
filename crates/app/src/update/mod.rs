@@ -35,7 +35,7 @@ pub enum UpdateState {
 
 impl UpdateState {
     /// The release an install would fetch now.
-    fn installable(&self) -> Option<&Release> {
+    pub fn installable(&self) -> Option<&Release> {
         match self {
             UpdateState::Available(r) | UpdateState::Failed { release: Some(r), .. } => Some(r),
             _ => None,

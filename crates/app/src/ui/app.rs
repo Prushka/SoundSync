@@ -1,6 +1,7 @@
 //! The eframe application: owns the engine, the tray and the UI state.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -17,6 +18,8 @@ use soundsync_engine::{Command, Engine, EngineOptions, Status};
 use super::AppContext;
 use super::tray::{Action, Tray};
 use crate::single_instance::InstanceGuard;
+use crate::update::install::{self, Staged, Swapped};
+use crate::update::{Updater, fetch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -107,7 +110,11 @@ pub struct SoundSyncApp {
     seen_device_events: u64,
     /// The remote microphone node last asked for its list, and when.
     inputs_asked: Option<(NodeId, Instant)>,
-    _instance: InstanceGuard,
+    pub updater: Updater,
+    /// The new build swapped in, and the arguments to start it with once the window has closed.
+    relaunch: Option<(Swapped, Vec<OsString>)>,
+    /// Dropped before the relaunch, so the new copy becomes the primary instance.
+    instance: Option<InstanceGuard>,
 }
 
 #[cfg(windows)]
@@ -164,7 +171,7 @@ impl SoundSyncApp {
             quit_ctx.request_repaint();
         });
         // Keeps `logic` (status, tray) running while the window is hidden.
-        let tick_ctx = ctx;
+        let tick_ctx = ctx.clone();
         std::thread::Builder::new()
             .name("soundsync-ui-tick".into())
             .spawn(move || {
@@ -175,6 +182,7 @@ impl SoundSyncApp {
             })
             .ok();
         let status = app.engine.status();
+        let (updater, updated) = start_updater(ctx.clone());
         let defaults_guard = crate::default_devices_api().map(|api| soundsync_engine::defaults::DefaultSwitchGuard::new(api, app.paths.state_file.clone()));
         let mut s = SoundSyncApp {
             drafts: Drafts::from_config(&app.config),
@@ -192,7 +200,7 @@ impl SoundSyncApp {
             render_devices: Vec::new(),
             capture_devices: Vec::new(),
             autostart: crate::autostart::is_enabled().map_err(|e| e.to_string()),
-            notice: None,
+            notice: updated.then(|| format!("Updated to SoundSync {}.", soundsync_core::version::version())),
             load_warnings: app.load_warnings,
             cable: super::vbcable::CableHelper::default(),
             defaults_guard,
@@ -207,7 +215,9 @@ impl SoundSyncApp {
             last_devices: Instant::now() - Duration::from_secs(60),
             seen_device_events: 0,
             inputs_asked: None,
-            _instance: app.instance,
+            updater,
+            relaunch: None,
+            instance: Some(app.instance),
         };
         s.refresh_devices();
         let (waiting, notice) = super::vbcable::resume_setup(s.defaults_guard.as_ref(), &s.render_devices);
@@ -248,9 +258,27 @@ impl SoundSyncApp {
             Action::ToggleBroadcast => self.command(Command::SetBroadcast(!st.broadcasting)),
             Action::ToggleMute => self.command(Command::SetMuted(!st.muted)),
             Action::ToggleSyncTest => self.command(Command::SyncTest(!st.sync_test)),
+            Action::InstallUpdate => self.updater.install(),
             Action::Quit => {
                 self.quitting.store(true, Ordering::Release);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Puts the downloaded build in place of this copy and quits; `on_exit` starts it.
+    fn swap_in(&mut self, staged: Staged, ctx: &egui::Context) {
+        match install::swap(&staged) {
+            Ok(swapped) => {
+                tracing::info!("update: swapped in {}; restarting", swapped.target.path().display());
+                let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+                self.relaunch = Some((swapped, install::relaunch_args(&args, self.visible, Os::current())));
+                self.quitting.store(true, Ordering::Release);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                tracing::warn!("update: {e}");
+                self.updater.swap_failed(e);
             }
         }
     }
@@ -362,6 +390,10 @@ impl eframe::App for SoundSyncApp {
             }
             if let Some(t) = &mut self.tray {
                 t.update(&self.status);
+                t.set_update(self.updater.state().installable().map(|r| r.build));
+            }
+            if let Some(staged) = self.updater.take_ready() {
+                self.swap_in(staged, ctx);
             }
             if self.status.device_events != self.seen_device_events {
                 self.seen_device_events = self.status.device_events;
@@ -388,5 +420,43 @@ impl eframe::App for SoundSyncApp {
     fn on_exit(&mut self) {
         tracing::info!("quitting");
         drop(self.engine.take());
+        let Some((swapped, args)) = self.relaunch.take() else { return };
+        drop(self.instance.take());
+        crate::logging::end_session(&self.paths.log_dir);
+        tracing::info!("update: starting {} {args:?}", swapped.target.path().display());
+        if let Err(e) = install::launch(&swapped.target, &args) {
+            tracing::error!("update: cannot start the new build ({e}); going back to the old one");
+            if let Err(e) = swapped.undo() {
+                tracing::error!("update: {e}");
+            }
+            if let Err(e) = install::launch(&swapped.target, &args) {
+                tracing::error!("update: cannot start SoundSync again: {e}");
+            }
+        }
     }
+}
+
+/// Starts the updater for this copy, and cleans up after an update (or an interrupted one).
+/// Also says whether this copy was just updated.
+fn start_updater(ctx: egui::Context) -> (Updater, bool) {
+    let target = install::target();
+    let mut updated = false;
+    if let Ok(t) = &target
+        && t.staging().exists()
+    {
+        updated = install::was_just_updated(t);
+        let t = t.clone();
+        // The old copy may still be exiting, and its exe stays locked until it has.
+        std::thread::Builder::new()
+            .name("soundsync-update-cleanup".into())
+            .spawn(move || {
+                if !install::clean_up(&t, Duration::from_secs(20)) {
+                    tracing::warn!("update: cannot remove {}", t.staging().display());
+                }
+            })
+            .ok();
+    }
+    let build = soundsync_core::version::build_number().and_then(|b| b.parse().ok());
+    let updater = Updater::start(target, build, fetch::LATEST_URL.into(), Duration::from_secs(10), Duration::from_secs(6 * 3600), Box::new(move || ctx.request_repaint()));
+    (updater, updated)
 }

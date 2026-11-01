@@ -11,7 +11,6 @@ mod macos_bundle;
 mod session_end;
 mod single_instance;
 mod ui;
-#[allow(dead_code)] // TEMPORARY until the UI uses it (plan Task 5)
 mod update;
 
 use std::sync::Arc;

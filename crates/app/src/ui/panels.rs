@@ -8,9 +8,11 @@ use soundsync_core::{MasterMode, Nanos, NodeId, Os};
 use soundsync_engine::{CalibStatus, Command, Status, VolumeStatus};
 
 use super::app::{SoundSyncApp, Tab};
-use super::format::{fmt_level, fmt_ms, fmt_opt_ms, role_label, sync_label, tray_status_line};
+use super::format::{fmt_level, fmt_ms, fmt_opt_ms, role_label, sync_label, tray_status_line, update_line, update_status};
+use crate::update::UpdateState;
 
 const WARN: Color32 = Color32::from_rgb(0xB2, 0x6A, 0x00);
+const INFO: Color32 = Color32::from_rgb(0x1E, 0x88, 0xE5);
 
 pub fn draw(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
     egui::Panel::top("header").show(ui, |ui| header(app, ui));
@@ -45,12 +47,13 @@ fn header(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
     warnings.extend(st.warnings.iter().cloned());
     if let Some(n) = app.notice.clone() {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(n).color(Color32::from_rgb(0x1E, 0x88, 0xE5)));
+            ui.label(RichText::new(n).color(INFO));
             if ui.small_button("✕").clicked() {
                 app.notice = None;
             }
         });
     }
+    update_header(app, ui);
     for w in warnings {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(format!("⚠ {w}")).color(WARN));
@@ -60,6 +63,44 @@ fn header(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
         });
     }
     ui.add_space(4.0);
+}
+
+/// The update line: what is available, the download's progress, or why it failed.
+fn update_header(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
+    let state = app.updater.state();
+    let Some(line) = update_line(&state) else { return };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(line).color(INFO));
+        match &state {
+            UpdateState::Available(r) => {
+                if ui.small_button("Update and restart").clicked() {
+                    app.updater.install();
+                }
+                if ui.small_button("What's new").clicked() {
+                    open_url(&r.page_url);
+                }
+            }
+            UpdateState::Downloading { received, total, .. } => {
+                ui.add(egui::ProgressBar::new(*received as f32 / (*total).max(1) as f32).desired_width(200.0));
+            }
+            UpdateState::Failed { release: Some(r), .. } => {
+                if ui.small_button("Retry").clicked() {
+                    app.updater.install();
+                }
+                if ui.small_button("Release page").clicked() {
+                    open_url(&r.page_url);
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
 }
 
 pub fn open_speaker_setup() {
@@ -489,6 +530,8 @@ fn settings(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
         }
     });
     ui.add_space(8.0);
+    ui.group(|ui| updates(app, ui));
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui.button("Open config folder").clicked()
             && let Some(dir) = app.config_path.parent()
@@ -498,6 +541,25 @@ fn settings(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
         if ui.button("Open logs").clicked() {
             open_folder(&app.paths.log_dir);
         }
-        ui.label(RichText::new(format!("SoundSync {}", soundsync_core::version::version())).weak());
+    });
+}
+
+fn updates(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
+    ui.heading("Updates");
+    let state = app.updater.state();
+    ui.label(format!("SoundSync {}", soundsync_core::version::version()));
+    let status = RichText::new(update_status(&state, std::time::SystemTime::now()));
+    ui.label(if matches!(state, UpdateState::Failed { .. }) { status.color(WARN) } else { status.weak() });
+    ui.horizontal(|ui| {
+        let idle = !matches!(
+            state,
+            UpdateState::Unavailable(_) | UpdateState::Checking | UpdateState::Downloading { .. } | UpdateState::Ready { .. } | UpdateState::Restarting(_)
+        );
+        if ui.add_enabled(idle, egui::Button::new("Check for updates")).clicked() {
+            app.updater.check_now();
+        }
+        if matches!(state, UpdateState::Available(_)) && ui.button("Update and restart").clicked() {
+            app.updater.install();
+        }
     });
 }
