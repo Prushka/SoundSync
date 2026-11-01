@@ -320,6 +320,13 @@ Paths:
   (`calibration_recovers_hidden_latencies`, level spread 2.95 dB).
 - **GitHub macOS runners oversleep about 20 ms per timer.** The fake devices adapt their buffering
   (`WakeTracker`), and `SS_FAKE_MIN_SLEEP_MS=20` reproduces the runners locally.
+  The test thread can oversleep too: bound the null output's frame count by measured elapsed time,
+  not the requested sleep (build 9 rendered 52,865 frames while the one-second wait ran long).
+- **Keep fake-room positions in frames.** At 48 kHz a sample lasts 20,833 1/3 ns. Truncating each
+  speaker or microphone timestamp to whole ns before indexing the room can merge samples and leave
+  holes, changing levels even without an underrun (the sweep gains 2.111615 dB, exactly the build 9
+  volume-matching failure). Map the stream origin plus its frame count directly
+  to room frames; keep the volume-matching assertions strict. Sample-boundary and mixing tests cover it.
 - **The LG TV/soundbar mutes the start of sound after minutes of digital silence:** it was lost after
   4.5 minutes and kept after 42 s. Hence the calibration wake-up noise. The same muting clips the start of
   real audio after long pauses; a keep-awake option was offered but isn't implemented.
@@ -453,6 +460,7 @@ the commit by its summary line (find it with `git log --grep`).
 | `fee635c` | Exact group-delay checks only where timers are punctual (the macOS runner's timers oversleep even with serial tests). |
 | `3c58d96` | Calibration tests judge individual sweeps only when no speaker underran (a stalled fake speaker cut the start off a sweep on the macOS runner). |
 | `47afa1b` … "Updates: uninstall cleanup, README and guide" | Self-update from GitHub releases: check every 6 h, Update and restart (header, Settings ▸ Updates, tray), in-place rename swap and relaunch; the log marker holds the process id. Verified end to end on Windows from build 7 to the real build 8. |
+| "Fix CI audio simulation and elapsed-time assertions" | Fix fake-room sample collisions behind calibration level errors; use elapsed time for the null-output rate test when CI oversleeps. Add deterministic sample-boundary and mixing regressions without relaxing calibration tolerances. |
 
 ## Open items and known limitations
 

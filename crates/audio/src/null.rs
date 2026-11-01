@@ -201,8 +201,11 @@ mod tests {
         let stream = open_null_output(now, fmt, Box::new(Count(seen.clone(), Some(10))));
         std::thread::sleep(std::time::Duration::from_millis(1000));
         drop(stream);
+        // The test thread can oversleep too. Bound frames by how long the stream actually
+        // ran, with the same 100 ms headroom, rather than assuming exactly one second.
+        let elapsed_frames = (start.elapsed().as_nanos() * fmt.sample_rate as u128 / 1_000_000_000) as usize;
         let g = seen.lock().unwrap();
-        assert!(g.0 <= 48_000 + 4_800, "never renders far ahead of real time: {} frames", g.0);
+        assert!(g.0 <= elapsed_frames + 4_800, "never renders far ahead of real time: {} frames in {elapsed_frames} elapsed frames", g.0);
         assert!(g.0 >= 30_000, "frames {}", g.0);
         for t in &g.1 {
             let lead = t.dac_time_ns - t.now_ns;

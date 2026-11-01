@@ -78,25 +78,37 @@ impl FakeRoom {
         Arc::new(FakeRoom { rate: sample_rate, t0: true_now(), buf: Mutex::new(Vec::new()) })
     }
 
-    fn index(&self, t: Nanos) -> Option<usize> {
-        (t >= self.t0).then(|| ((t - self.t0) as i128 * self.rate as i128 / 1_000_000_000) as usize).filter(|&i| i < ROOM_MAX_SECONDS * self.rate as usize)
+    fn frame_at(&self, t: Nanos) -> f64 {
+        (t - self.t0) as f64 * self.rate as f64 / 1e9
     }
 
-    fn add_many(&self, items: &[(Nanos, f32)]) {
+    fn index(&self, frame: f64) -> Option<usize> {
+        (frame >= 0.0 && frame < (ROOM_MAX_SECONDS * self.rate as usize) as f64).then_some(frame as usize)
+    }
+
+    // Keep the stream's origin and frame count separate until indexing the room. At 48 kHz a
+    // frame lasts 20,833 1/3 ns: truncating each timestamp to ns first can merge adjacent samples
+    // and leave holes, changing a speaker's measured level even when no device underran.
+    fn add(&self, start: Nanos, first: i64, rate: f64, samples: &[f32], channels: usize) {
+        let origin = self.frame_at(start);
+        let step = self.rate as f64 / rate;
         let mut buf = self.buf.lock().unwrap();
-        for &(t, x) in items {
-            if let Some(i) = self.index(t) {
+        for (k, frame) in samples.chunks_exact(channels).enumerate() {
+            if let Some(i) = self.index(origin + (first + k as i64) as f64 * step) {
                 if i >= buf.len() {
                     buf.resize(i + self.rate as usize, 0.0);
                 }
-                buf[i] += x;
+                buf[i] += frame[0];
             }
         }
     }
 
-    fn read(&self, t: Nanos) -> f32 {
+    fn read(&self, start: Nanos, first: u64, out: &mut [f32]) {
+        let origin = self.frame_at(start);
         let buf = self.buf.lock().unwrap();
-        self.index(t).and_then(|i| buf.get(i).copied()).unwrap_or(0.0)
+        for (k, x) in out.iter_mut().enumerate() {
+            *x = self.index(origin + (first + k as u64) as f64).and_then(|i| buf.get(i).copied()).unwrap_or(0.0);
+        }
     }
 }
 
@@ -382,7 +394,6 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
     let mut found = Vec::new();
     let room = inner.lock().unwrap().room.clone();
     let mut sleepy = inner.lock().unwrap().sleepy.get(&spec.name).copied().map(SleepySink::new);
-    let mut emitted: Vec<(Nanos, f32)> = Vec::new();
     while !stop.load(Ordering::Acquire) && !device_removed(&inner, &spec.name) {
         let now = true_now();
         let played = ((now - t_start) as f64 * dev_rate / 1e9).floor() as i64;
@@ -412,13 +423,9 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
                 if let Some(t) = det.feed(out[j * ch], frame_true(w - 1) + shift, frame_true(w) + shift) {
                     found.push(t);
                 }
-                if room.is_some() {
-                    emitted.push(((frame_true(w) + shift) as Nanos, out[j * ch]));
-                }
             }
             if let Some(r) = &room {
-                r.add_many(&emitted);
-                emitted.clear();
+                r.add(t_start + spec.reported_latency_ns + spec.hidden_latency_ns, written, dev_rate, out, ch);
             }
             if !found.is_empty() {
                 inner.lock().unwrap().onsets.entry(spec.name.clone()).or_default().append(&mut found);
@@ -493,9 +500,7 @@ fn run_mic(name: String, hidden: Nanos, room: Arc<FakeRoom>, time: TimeMap, inne
     while !stop.load(Ordering::Acquire) && !device_removed(&inner, &name) {
         // Outputs write ahead of real time, so the room is complete up to "now".
         while frame_true(produced + chunk) <= true_now() - 5_000_000 && !stop.load(Ordering::Acquire) {
-            for (i, x) in buf.iter_mut().enumerate() {
-                *x = room.read(frame_true(produced + i as u64) - hidden);
-            }
+            room.read(t_start - hidden, produced, &mut buf);
             let t = time.host(frame_true(produced));
             sink.on_capture(&buf, fmt, CaptureInfo { time_ns: t, raw_time_ns: t, frames: chunk as usize, silent: false, discontinuity: false });
             produced += chunk;
@@ -604,6 +609,44 @@ mod tests {
 
     fn stereo() -> StreamFormat {
         StreamFormat { sample_rate: 48_000, channels: 2, channel_mask: 3 }
+    }
+
+    #[test]
+    fn room_preserves_a_speakers_level_on_its_sample_boundaries() {
+        // A 48 kHz frame lasts 20,833 1/3 ns. Rounding its timestamp to whole ns must
+        // not put two speaker samples into one room sample and leave the next empty.
+        for rate in [44_100, 48_000] {
+            for offset in [0, 1, 10_417, 20_833, 20_834, 180_000_000] {
+                let room = FakeRoom { rate, t0: 1_000_000_000_000, buf: Mutex::new(Vec::new()) };
+                let start = room.t0 + offset;
+                let samples: Vec<f32> = (0..480).map(|i| i as f32 / 1000.0).collect();
+                // Different callback sizes must keep the same sample positions, too.
+                for (k, chunk) in samples.chunks(17).enumerate() {
+                    room.add(start, (k * 17) as i64, rate as f64, chunk, 1);
+                }
+                let mut heard = vec![0.0; samples.len()];
+                for (k, chunk) in heard.chunks_mut(13).enumerate() {
+                    room.read(start, (k * 13) as u64, chunk);
+                }
+                assert_eq!(heard, samples, "{rate} Hz, offset {offset} ns");
+            }
+        }
+    }
+
+    #[test]
+    fn room_mixes_speakers_at_their_emission_times() {
+        let room = FakeRoom { rate: 48_000, t0: 1_000_000_000_000, buf: Mutex::new(Vec::new()) };
+        // Channel 0 of two stereo speakers, starting 1 ms apart; the mic starts at room time 0.
+        let a = [0.25, -0.25].repeat(96);
+        let b = [0.5, -0.5].repeat(96);
+        room.add(room.t0 + 1_000_000, 0, 48_000.0, &a, 2);
+        room.add(room.t0 + 2_000_000, 0, 48_000.0, &b, 2);
+        let mut heard = vec![0.0; 240];
+        room.read(room.t0, 0, &mut heard);
+        assert_eq!(heard, [vec![0.0; 48], vec![0.25; 48], vec![0.75; 48], vec![0.5; 48], vec![0.0; 48]].concat());
+        let mut before = [1.0; 48];
+        room.read(room.t0 - 1_000_000, 0, &mut before);
+        assert_eq!(before, [0.0; 48], "before the room's start is silence");
     }
 
     /// Records timings; blocks 50 ms on call number `.1` (a scheduling stall).
