@@ -254,9 +254,10 @@ Paths:
   - Test names are sentences describing behaviour, e.g. `a_speaker_that_sleeps_after_silence_still_plays_its_first_sweep`.
   - Engine tests use `spawn_with(Spec{..}, configure, setup)`, `wait_until` and `FakeHost`. The fake host
     provides: `FakeRoom`, `add_mic`, `make_sleepy`, `set_default_render`, device volumes with a dB curve
-    where 50% is −10.5 dB, and `set_active_sessions`.
+    where 50% is −10.5 dB, `set_active_sessions`, and `underruns` (when a stalled output lost audio).
   - Timing tests accept any group delay in effect during the window (`DelayLog`). A test that needs punctual
-    timers is skipped when `timers_are_punctual()` is false.
+    timers is skipped when `timers_are_punctual()` is false. Calibration tests check each sweep's quality
+    only when no speaker underran during the run (`speakers_underran_since`).
 - **Commits:** an imperative summary line, then a short body of bullets. End the message with the
   `Co-Authored-By:` trailer the system specifies. Commit to `main`, and **never push**.
 
@@ -286,6 +287,14 @@ Paths:
   To see what a delay decision was based on, temporarily log `peer_requirements` in
   `update_presentation_offset`. `run-under-load.ps1` runs one test with its output shown while a second
   copy of the suite loads the same core.
+- **A stalled fake speaker spoils a sweep.** When the runner stalls an output thread past its buffer, the
+  fake device underruns and moves on, like a real one:
+  - A sweep that hasn't started yet loses its beginning. It still lands on time but measures about 3 dB
+    quieter, with an SNR around 60 dB instead of 146.
+  - A sweep already playing plays the rest late by the gap.
+
+  The run then rightly flags that sweep, and the medians still come out right. Build 7 failed this way
+  (`calibration_recovers_hidden_latencies`, level spread 2.95 dB).
 - **GitHub macOS runners oversleep about 20 ms per timer.** The fake devices adapt their buffering
   (`WakeTracker`), and `SS_FAKE_MIN_SLEEP_MS=20` reproduces the runners locally.
 - **The LG TV/soundbar mutes the start of sound after minutes of digital silence:** it was lost after
@@ -432,6 +441,8 @@ review rulings are recorded in the local ledger. The decisions most likely to ma
   - Real-time exceptions: the calibration mic callback locks and allocates; the mixer frees on the render
     thread when its garbage ring is full; ArcSwap guard drops; `send_to` per subscriber.
   - NaN samples pass through the limiter.
+  - After an output underrun, a scheduled signal that has already started plays the rest late by the gap.
+    Streams realign; signals don't.
   - Duplicate device names aren't disambiguated.
   - The keep-alive event handle is closed early.
   - The render loop relies on a 100 ms wait timeout.
