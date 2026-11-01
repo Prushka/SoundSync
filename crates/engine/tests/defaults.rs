@@ -61,7 +61,7 @@ fn virtual_broadcast_switches_default_and_restores() {
 }
 
 #[test]
-fn silence_watchdog_warns_when_apps_play_silence() {
+fn silence_watchdog_notes_when_apps_play_silence() {
     let m = spawn_with(
         Spec::new("m"),
         |c: &mut Config| {
@@ -81,10 +81,13 @@ fn silence_watchdog_warns_when_apps_play_silence() {
         },
     );
     m.engine.command(Command::SetBroadcast(true));
-    let warned = |n: &TestNode| n.engine.status().warnings.iter().any(|w| w.contains("hears silence"));
-    assert!(wait_until(Duration::from_secs(12), || warned(&m)), "{:?}", m.engine.status().warnings);
+    // Often nothing is playing at all (a paused video keeps its session open): information, not
+    // a warning.
+    let noted = |n: &TestNode| n.engine.status().notes.iter().any(|w| w.contains("CABLE Input is silent"));
+    assert!(wait_until(Duration::from_secs(12), || noted(&m)), "{:?}", m.engine.status());
+    assert!(m.engine.status().warnings.iter().all(|w| !w.contains("silent")), "{:?}", m.engine.status().warnings);
     m.host.set_active_sessions("CABLE Input", 0);
-    assert!(wait_until(Duration::from_secs(4), || !warned(&m)), "warning clears when no app plays");
+    assert!(wait_until(Duration::from_secs(4), || !noted(&m)), "the note clears when no app plays");
     m.shutdown();
 }
 

@@ -6,6 +6,7 @@ use common::*;
 use soundsync_audio::fake::FakeClock;
 use soundsync_audio::{AudioHost, DeviceSelector};
 use soundsync_core::config::Config;
+use soundsync_core::protocol::VolumeChange;
 use soundsync_engine::Command;
 
 fn tv() -> DeviceSelector {
@@ -66,4 +67,35 @@ fn receivers_follow_the_masters_volume_in_decibels() {
     assert!((g - 0.297).abs() < 0.01, "followed gain {g}");
     r.shutdown();
     m.shutdown();
+}
+
+#[test]
+fn any_node_changes_another_nodes_volume() {
+    let a = spawn("a", FakeClock::default(), |_| {});
+    let b = spawn_with(Spec { peers: &[&a], ..Spec::new("b") }, |c: &mut Config| c.playback.output_device = "TV".into(), |h| h.add_output(output("TV", 0.0, 10, 0)));
+    let b_id = b.engine.status().node_id;
+    let seen_by_a = || a.engine.status().peers.iter().find(|p| p.id == b_id).and_then(|p| p.volume);
+    assert!(wait_until(Duration::from_secs(5), || seen_by_a().is_some_and(|v| v.device && v.volume == 1.0)), "{:?}", seen_by_a());
+    // a moves b's Volume slider: b's own device volume follows, and a sees the new value.
+    a.engine.command(Command::ChangeVolume { node: b_id, change: VolumeChange::Set(0.3) });
+    assert!(wait_until(Duration::from_secs(2), || (b.host.endpoint_volume(&tv()).unwrap().scalar - 0.3).abs() < 1e-6));
+    assert!(wait_until(Duration::from_secs(2), || seen_by_a().is_some_and(|v| (v.volume - 0.3).abs() < 1e-6)), "{:?}", seen_by_a());
+    a.engine.command(Command::ChangeVolume { node: b_id, change: VolumeChange::Muted(true) });
+    assert!(wait_until(Duration::from_secs(2), || b.host.endpoint_volume(&tv()).unwrap().muted));
+    assert!(wait_until(Duration::from_secs(2), || seen_by_a().is_some_and(|v| v.muted)));
+    // Volume matching turns b down by 6 dB from wherever it is.
+    let before = b.host.endpoint_volume(&tv()).unwrap().db;
+    a.engine.command(Command::ChangeVolume { node: b_id, change: VolumeChange::TurnDown { db: 6.0 } });
+    assert!(wait_until(Duration::from_secs(2), || (b.host.endpoint_volume(&tv()).unwrap().db - (before - 6.0)).abs() < 0.01));
+    b.shutdown();
+    a.shutdown();
+}
+
+#[test]
+fn turning_down_a_node_without_a_device_volume_lowers_its_soundsync_level() {
+    let n = spawn("n", FakeClock::default(), |_| {}); // null output
+    let id = n.engine.status().node_id;
+    n.engine.command(Command::ChangeVolume { node: id, change: VolumeChange::TurnDown { db: 6.0 } });
+    assert!(wait_until(Duration::from_secs(1), || (n.engine.status().volume - 0.501).abs() < 0.001), "{}", n.engine.status().volume);
+    n.shutdown();
 }

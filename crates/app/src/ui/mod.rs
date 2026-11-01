@@ -38,7 +38,7 @@ pub fn run_gui(ctx: AppContext) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SoundSync")
-            .with_inner_size([980.0, 680.0])
+            .with_inner_size([1240.0, 720.0])
             .with_min_inner_size([640.0, 420.0])
             .with_icon(Arc::new(icon))
             .with_visible(ctx.start_visible),

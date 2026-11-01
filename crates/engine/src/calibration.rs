@@ -8,9 +8,9 @@
 use std::sync::{Arc, Mutex};
 
 use soundsync_audio::{CaptureInfo, CaptureSink, DeviceSelector, Stream, StreamFormat};
-use soundsync_core::calib::{CalibReference, calibration_results, calibration_sweep, find_signal};
-use soundsync_core::calib::{CalibResult, Sweeps};
-use soundsync_core::protocol::{CalibMsg, CalibSignal, Control};
+use soundsync_core::calib::{CalibReference, calibration_results, calibration_sweep, find_signal, wake_noise};
+use soundsync_core::calib::{CalibResult, Heard, Sweeps};
+use soundsync_core::protocol::{CalibMsg, CalibSignal, Control, VolumeChange};
 use soundsync_core::{MasterMode, Nanos, NodeId, Role};
 
 use crate::node::Node;
@@ -19,11 +19,16 @@ use crate::status::CalibStatus;
 /// Sweeps per device: the median of three survives one disturbed sweep; a check plays one.
 const SWEEPS: usize = 3;
 const CHECK_SWEEPS: usize = 1;
-const FIRST_SLOT_NS: Nanos = 1_500_000_000;
+/// Every speaker plays a soft noise from here (for a second) so TVs and soundbars that muted
+/// after silence are awake when the sweeps start.
+const WAKE_AT_NS: Nanos = 200_000_000;
+const FIRST_SLOT_NS: Nanos = 2_000_000_000;
 const SLOT_SPACING_NS: Nanos = 1_000_000_000;
 const TAIL_NS: Nanos = 1_000_000_000;
 const WINDOW_BEFORE_NS: Nanos = 50_000_000;
 const WINDOW_AFTER_NS: Nanos = 700_000_000;
+/// Level differences smaller than this are left alone by volume matching.
+const MIN_TURN_DOWN_DB: f32 = 0.5;
 /// A participant unpauses on its own if the coordinator's End never arrives.
 const PARTICIPANT_GRACE_NS: Nanos = 2_000_000_000;
 
@@ -103,6 +108,7 @@ impl Node {
         let mic = match self.host.open_input(&DeviceSelector::parse(mic_device), Box::new(MicSink(rec.clone()))) {
             Ok(m) => m,
             Err(e) => {
+                tracing::warn!("calibration: cannot open microphone {mic_device}: {e}");
                 self.calib.status = CalibStatus::Failed(format!("cannot open microphone {mic_device}: {e}"));
                 return;
             }
@@ -119,8 +125,13 @@ impl Node {
             .collect();
         let until = slots.last().map_or(now, |s| s.1) + TAIL_NS;
         let begin = Control::Calib(CalibMsg::Begin { session, until_ns: until });
+        let wake = Control::Calib(CalibMsg::Play { session, at_ns: now + WAKE_AT_NS, signal: CalibSignal::Wake });
         for p in self.peers.iter() {
             self.send(p.addr, &begin);
+            self.send(p.addr, &wake);
+        }
+        if let Some(rate) = self.output_rate() {
+            self.play_signal(wake_noise(rate), now + WAKE_AT_NS);
         }
         for (id, at) in &slots {
             if *id == self.id() {
@@ -167,15 +178,36 @@ impl Node {
             }
         }
         let sweep = calibration_sweep(rate);
-        // Each device's sweeps: (arrival − scheduled, SNR), or None if that sweep was not heard.
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Some(first) = run.slots.first()
+        {
+            // The microphone before the first sweep: shows when the wake-up noise got through.
+            let block = |t: Nanos| {
+                let (lo, hi) = (times.partition_point(|x| *x < t), times.partition_point(|x| *x < t + 100_000_000));
+                let ms = samples[lo..hi].iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / (hi - lo).max(1) as f64;
+                format!("{:.0}", 10.0 * ms.max(1e-12).log10())
+            };
+            let blocks: Vec<String> = (0..(FIRST_SLOT_NS / 100_000_000)).map(|i| block(first.1 - FIRST_SLOT_NS + i * 100_000_000)).collect();
+            tracing::debug!("calibration: microphone before the first sweep, dBFS per 100 ms: {}", blocks.join(" "));
+        }
         let mut measured: Vec<(NodeId, Sweeps)> = run.nodes.iter().map(|(id, _)| (*id, Vec::new())).collect();
-        for (id, at) in &run.slots {
+        for (k, (id, at)) in run.slots.iter().enumerate() {
             let lo = times.partition_point(|t| *t < at - WINDOW_BEFORE_NS);
             let hi = times.partition_point(|t| *t < at + WINDOW_AFTER_NS);
             let heard = (hi > lo).then(|| find_signal(&samples[lo..hi], &sweep)).flatten().map(|det| {
                 let arrival = times[lo] + (det.offset_frames * 1e9 / rate as f64).round() as Nanos;
-                (arrival - at, det.snr_db)
+                Heard { residual_ns: arrival - at, snr_db: det.snr_db, level_db: det.level_db, peak_dbfs: det.peak_dbfs }
             });
+            tracing::debug!(
+                "calibration: sweep {k} ({id:016x}): {}",
+                heard.map_or("not heard".to_string(), |h| format!(
+                    "arrived {:+.2} ms, {:.0} dB, level {:.1} dBFS, peak {:.1} dBFS",
+                    h.residual_ns as f64 / 1e6,
+                    h.snr_db,
+                    h.level_db,
+                    h.peak_dbfs
+                ))
+            );
             if let Some((_, sweeps)) = measured.iter_mut().find(|(n, _)| n == id) {
                 sweeps.push(heard);
             }
@@ -190,11 +222,24 @@ impl Node {
         let Some(run) = self.calib.run.take() else { return };
         let (results, error) = match Self::analyze(&run) {
             Ok(r) => (r, None),
-            Err(e) => (Vec::new(), Some(e)),
+            Err(e) => {
+                tracing::warn!("calibration {:08x} failed: {e}", run.session);
+                (Vec::new(), Some(e))
+            }
         };
         for r in &results {
             let what = if run.check { "is off by" } else { "needs" };
-            tracing::info!("calibration: {:016x} {what} {:+.2} ms ({:.0} dB, {}/{} sweeps, spread {:.2} ms)", r.node, r.delta_ns as f64 / 1e6, r.snr_db, r.heard, r.sweeps, r.spread_ns as f64 / 1e6);
+            tracing::info!(
+                "calibration: {:016x} {what} {:+.2} ms, {:+.1} dB louder than the quietest ({:.0} dB, {}/{} sweeps, spread {:.2} ms, peak {:.1} dBFS)",
+                r.node,
+                r.delta_ns as f64 / 1e6,
+                r.level_db,
+                r.snr_db,
+                r.heard,
+                r.sweeps,
+                r.spread_ns as f64 / 1e6,
+                r.peak_dbfs
+            );
         }
         let msg = Control::Calib(CalibMsg::Result { session: run.session, results: results.clone(), check: run.check, error: error.clone() });
         let end = Control::Calib(CalibMsg::End { session: run.session });
@@ -221,16 +266,20 @@ impl Node {
         self.update_paused();
     }
 
-    /// Adds each measured delta to the node's current extra latency.
-    pub(crate) fn apply_calibration(&mut self) {
+    /// Adds each measured delta to the node's current extra latency; with `match_volumes`, also
+    /// turns every speaker down to the quietest one's level.
+    pub(crate) fn apply_calibration(&mut self, match_volumes: bool) {
         let CalibStatus::Done { results, .. } = self.calib.status.clone() else { return };
-        for (node, delta) in results.iter().map(|r| (r.node, r.delta_ns)) {
-            if node == self.id() {
+        for r in &results {
+            if r.node == self.id() {
                 let cur = self.config.extra_latency_ns();
-                self.set_own_extra_latency(cur + delta);
-            } else if let Some(p) = self.peers.get(node) {
+                self.set_own_extra_latency(cur + r.delta_ns);
+            } else if let Some(p) = self.peers.get(r.node) {
                 let cur = p.state.as_ref().map_or(0, |s| s.extra_latency_ns);
-                self.send(p.addr, &Control::SetOffset { target: node, extra_latency_ns: cur + delta });
+                self.send(p.addr, &Control::SetOffset { target: r.node, extra_latency_ns: cur + r.delta_ns });
+            }
+            if match_volumes && r.level_db >= MIN_TURN_DOWN_DB {
+                self.change_volume(r.node, VolumeChange::TurnDown { db: r.level_db });
             }
         }
         self.calib.status = CalibStatus::Idle;
@@ -245,11 +294,12 @@ impl Node {
                 self.calib.status = CalibStatus::Running { step: 0, total: self.peers.len() + 1 };
                 self.update_paused();
             }
-            CalibMsg::Play { session, at_ns, signal: CalibSignal::Sweep } => {
+            CalibMsg::Play { session, at_ns, signal: signal @ (CalibSignal::Sweep | CalibSignal::Wake) } => {
                 let ours = self.calib.participant.as_ref().is_some_and(|p| p.coordinator == sender && p.session == session);
                 let map = self.peers.get(sender).and_then(|p| p.clock_map());
                 if let (true, Some(map), Some(rate)) = (ours, map, self.output_rate()) {
-                    self.play_signal(calibration_sweep(rate), map.remote_to_local(at_ns));
+                    let samples = if signal == CalibSignal::Wake { wake_noise(rate) } else { calibration_sweep(rate) };
+                    self.play_signal(samples, map.remote_to_local(at_ns));
                 }
             }
             CalibMsg::Play { .. } => {}

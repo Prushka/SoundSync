@@ -149,6 +149,8 @@ mod tests {
                 extra_latency_ns: 0,
                 output: None,
                 rx: vec![],
+                volume: None,
+                inputs: None,
             }],
             streams: vec![StreamStatus {
                 master: 0x1234,

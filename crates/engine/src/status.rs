@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use soundsync_core::player::PlayState;
-use soundsync_core::protocol::{OutputInfo, RxStat};
+use soundsync_core::protocol::{InputList, OutputInfo, RxStat};
 use soundsync_core::{MasterMode, Nanos, NodeId, Os, Role, StreamFormat};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +27,19 @@ pub struct PeerStatus {
     pub extra_latency_ns: Nanos,
     pub output: Option<OutputInfo>,
     pub rx: Vec<RxStat>,
+    /// Its Volume slider, once it has reported it.
+    pub volume: Option<VolumeStatus>,
+    /// Its microphones, once asked for (`Command::ListInputs`).
+    pub inputs: Option<InputList>,
+}
+
+/// A node's Volume slider as it reports it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeStatus {
+    pub volume: f32,
+    pub muted: bool,
+    /// The slider is the output device's own volume (else SoundSync's level on that node).
+    pub device: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +80,10 @@ pub struct Status {
     pub peers: Vec<PeerStatus>,
     pub streams: Vec<StreamStatus>,
     pub warnings: Vec<String>,
+    /// Information about current conditions that needs no action.
+    pub notes: Vec<String>,
+    /// Counts device changes the OS reported (device pickers refresh when it moves).
+    pub device_events: u64,
     pub calibration: CalibStatus,
     pub sync_test: bool,
     /// Stream playback is paused (calibration or sync test in progress).
@@ -95,6 +112,8 @@ impl Default for Status {
             peers: Vec::new(),
             streams: Vec::new(),
             warnings: Vec::new(),
+            notes: Vec::new(),
+            device_events: 0,
             calibration: CalibStatus::Idle,
             sync_test: false,
             streams_paused: false,

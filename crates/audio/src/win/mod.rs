@@ -78,6 +78,10 @@ impl AudioHost for WinHost {
         volume::set_endpoint_volume(sel, scalar)
     }
 
+    fn set_endpoint_volume_db(&self, sel: &DeviceSelector, db: f32) -> Result<(), AudioError> {
+        volume::set_endpoint_volume_db(sel, db)
+    }
+
     fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {
         volume::set_endpoint_mute(sel, muted)
     }

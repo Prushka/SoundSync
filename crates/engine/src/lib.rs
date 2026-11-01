@@ -21,6 +21,7 @@ mod devices;
 mod node;
 mod power;
 mod synctest;
+mod volume;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ use soundsync_core::config::Config;
 
 pub use command::Command;
 pub use net::NetImpair;
-pub use status::{CalibStatus, DeviceStatus, PeerStatus, Status, StreamStatus};
+pub use status::{CalibStatus, DeviceStatus, PeerStatus, Status, StreamStatus, VolumeStatus};
 
 pub struct EngineOptions {
     pub config: Config,

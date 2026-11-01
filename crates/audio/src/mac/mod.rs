@@ -122,6 +122,8 @@ pub struct MacHost {
 
 impl MacHost {
     pub fn new() -> Result<MacHost, AudioError> {
+        // Best effort: without it the device list may only refresh while the main loop runs.
+        let _ = props::hal_uses_own_thread();
         Ok(MacHost { _private: () })
     }
 
@@ -196,6 +198,11 @@ impl AudioHost for MacHost {
     fn set_endpoint_volume(&self, sel: &DeviceSelector, scalar: f32) -> Result<(), AudioError> {
         let (_, id) = Self::resolve(Direction::Render, sel)?;
         props::set_volume(id, scalar.clamp(0.0, 1.0)).then_some(()).ok_or(AudioError::Unsupported(NO_VOLUME))
+    }
+
+    fn set_endpoint_volume_db(&self, sel: &DeviceSelector, db: f32) -> Result<(), AudioError> {
+        let (_, id) = Self::resolve(Direction::Render, sel)?;
+        props::set_volume_db(id, db).then_some(()).ok_or(AudioError::Unsupported(NO_VOLUME))
     }
 
     fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {

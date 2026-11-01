@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use common::*;
 use soundsync_audio::fake::{FakeClock, FakeHost, FakeRoom};
+use soundsync_audio::{AudioHost, DeviceSelector};
 use soundsync_core::calib::click;
+use soundsync_core::protocol::InputList;
 use soundsync_core::config::Config;
 use soundsync_core::{Nanos, NodeId};
 use soundsync_engine::{CalibStatus, Command};
@@ -16,9 +18,15 @@ const HIDDEN_MS: [i64; 3] = [0, 35, 180];
 /// Node 0: master (CABLE source, monitor "Spk") with the mic; nodes 1, 2: receivers. All three
 /// speakers sit in one room with the given hidden latencies.
 fn room_setup(room: &Arc<FakeRoom>) -> Vec<TestNode> {
+    room_setup_with(room, |_, _| {})
+}
+
+/// [`room_setup`], with `extra(i, host)` adding to node i's devices.
+fn room_setup_with(room: &Arc<FakeRoom>, extra: impl Fn(usize, &FakeHost)) -> Vec<TestNode> {
     let mut nodes: Vec<TestNode> = Vec::new();
     for (i, hidden) in HIDDEN_MS.iter().enumerate() {
         let room = room.clone();
+        let extra = &extra;
         let hidden = *hidden;
         let peers: Vec<&TestNode> = nodes.iter().collect();
         let node = spawn_with(
@@ -35,6 +43,7 @@ fn room_setup(room: &Arc<FakeRoom>) -> Vec<TestNode> {
                     h.add_source(pulse_source("CABLE Input", 0));
                     h.add_mic("Mic", 12 * MS);
                 }
+                extra(i, h);
             },
         );
         nodes.push(node);
@@ -71,7 +80,7 @@ fn calibration_recovers_hidden_latencies() {
         assert_eq!((r.heard, r.sweeps), (3, 3), "{r:?}");
         assert!(r.snr_db >= 30.0 && r.spread_ns < 500_000 && r.problems().is_empty(), "{r:?}");
     }
-    nodes[0].engine.command(Command::ApplyCalibration);
+    nodes[0].engine.command(Command::ApplyCalibration { match_volumes: true });
     assert!(wait_until(Duration::from_secs(3), || extra_of(&nodes[2]) != 0 && extra_of(&nodes[0]) != 0));
     sleep(Duration::from_millis(300));
     for a in 0..3 {
@@ -100,6 +109,100 @@ fn calibration_recovers_hidden_latencies() {
     for n in nodes.into_iter().rev() {
         n.shutdown();
     }
+}
+
+fn spk() -> DeviceSelector {
+    DeviceSelector::Name("Spk".into())
+}
+
+fn run_calibration(nodes: &[TestNode], check: bool) -> Vec<soundsync_core::calib::CalibResult> {
+    let mic_node = id(&nodes[0]);
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check });
+    let done = || matches!(&nodes[0].engine.status().calibration, CalibStatus::Done { check: c, .. } if *c == check);
+    assert!(wait_until(Duration::from_secs(20), done), "{:?}", nodes[0].engine.status().calibration);
+    let CalibStatus::Done { results, .. } = nodes[0].engine.status().calibration.clone() else { unreachable!() };
+    results
+}
+
+#[test]
+fn calibration_matches_volumes_to_the_quietest_speaker() {
+    let room = FakeRoom::new(48_000);
+    let nodes = room_setup(&room);
+    // Device volumes 60%, 80%, 100%: -7.76, -3.39 and 0 dB on the fake volume curve.
+    for (n, v) in nodes.iter().zip([0.6, 0.8, 1.0]) {
+        n.host.set_endpoint_volume(&spk(), v).unwrap();
+    }
+    let db = |n: &TestNode| n.host.endpoint_volume(&spk()).unwrap().db;
+    let want: Vec<f32> = nodes.iter().map(|n| db(n) - db(&nodes[0])).collect();
+    let results = run_calibration(&nodes, false);
+    for (n, want) in nodes.iter().zip(&want) {
+        let r = results.iter().find(|r| r.node == id(n)).unwrap();
+        assert!((r.level_db - want).abs() < 0.3, "{}: level {} dB, want {want} dB", n.engine.status().name, r.level_db);
+    }
+    nodes[0].engine.command(Command::ApplyCalibration { match_volumes: true });
+    let quietest = db(&nodes[0]);
+    assert!(wait_until(Duration::from_secs(3), || nodes.iter().all(|n| (db(n) - quietest).abs() < 0.3)), "{:?}", nodes.iter().map(db).collect::<Vec<_>>());
+    sleep(Duration::from_millis(500));
+    // A check now finds the speakers equally loud.
+    for r in run_calibration(&nodes, true) {
+        assert!(r.level_db < 0.5, "still louder after matching: {r:?}");
+    }
+    for n in nodes.into_iter().rev() {
+        n.shutdown();
+    }
+}
+
+#[test]
+fn applying_without_matching_volumes_leaves_them_alone() {
+    let room = FakeRoom::new(48_000);
+    let nodes = room_setup(&room);
+    nodes[2].host.set_endpoint_volume(&spk(), 0.5).unwrap();
+    let results = run_calibration(&nodes, false);
+    assert!(results.iter().any(|r| r.level_db > 5.0), "{results:?}");
+    nodes[0].engine.command(Command::ApplyCalibration { match_volumes: false });
+    assert!(wait_until(Duration::from_secs(3), || extra_of(&nodes[2]) != 0));
+    sleep(Duration::from_millis(300));
+    assert_eq!(nodes.iter().map(|n| n.host.endpoint_volume(&spk()).unwrap().scalar).collect::<Vec<_>>(), vec![1.0, 1.0, 0.5]);
+    for n in nodes.into_iter().rev() {
+        n.shutdown();
+    }
+}
+
+#[test]
+fn a_speaker_that_sleeps_after_silence_still_plays_its_first_sweep() {
+    // Like the LG TV: after a while of digital silence it mutes, and the first 400 ms of sound
+    // after that are lost. Calibration must wake it before the first sweep.
+    let room = FakeRoom::new(48_000);
+    let nodes = room_setup_with(&room, |i, h| {
+        if i == 1 {
+            h.make_sleepy("Spk", 4_000 * MS, 400 * MS);
+        }
+    });
+    sleep(Duration::from_millis(4_500)); // silent long enough to fall asleep
+    let results = run_calibration(&nodes, false);
+    for r in &results {
+        assert_eq!((r.heard, r.sweeps), (3, 3), "{r:?}");
+    }
+    for n in nodes.into_iter().rev() {
+        n.shutdown();
+    }
+}
+
+#[test]
+fn another_nodes_microphones_can_be_listed() {
+    let a = spawn("a", FakeClock::default(), |_| {});
+    let b = spawn_linked("b", FakeClock::default(), &[&a], |h| {
+        h.add_mic("USB Mic", 0);
+        h.add_mic("Line In", 0);
+    });
+    let b_id = id(&b);
+    assert!(wait_until(Duration::from_secs(5), || a.engine.status().peers.iter().any(|p| p.id == b_id)));
+    a.engine.command(Command::ListInputs(b_id));
+    let inputs = || a.engine.status().peers.iter().find(|p| p.id == b_id).and_then(|p| p.inputs.clone());
+    assert!(wait_until(Duration::from_secs(3), || inputs().is_some()));
+    assert_eq!(inputs().unwrap(), InputList { default: Some("USB Mic".into()), devices: vec!["USB Mic".into(), "Line In".into()] });
+    b.shutdown();
+    a.shutdown();
 }
 
 #[test]
@@ -168,5 +271,3 @@ fn sync_test_clicks_coincide() {
     }
 }
 
-#[allow(dead_code)]
-fn unused(_: FakeClock) {}

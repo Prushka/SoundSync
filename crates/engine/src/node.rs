@@ -12,7 +12,8 @@ use crossbeam_channel::{Receiver, Sender, select, tick};
 use soundsync_audio::{AudioHost, DeviceEvent};
 use soundsync_core::clock::ClockSample;
 use soundsync_core::config::Config;
-use soundsync_core::protocol::{Control, Hello};
+use soundsync_audio::Direction;
+use soundsync_core::protocol::{Control, Hello, InputList, PROTOCOL_VERSION, control_fits};
 use soundsync_core::{Nanos, NodeId, Os, Role};
 
 use crate::calibration::CalibState;
@@ -22,10 +23,12 @@ use crate::discovery::{Discovery, inbound_suspect};
 use crate::net::{Inbound, RxCmd, RxCounters, Transport};
 use crate::peers::PeerTable;
 use crate::power::{GapDetector, wall_ns};
-use crate::status::{PeerStatus, Status};
+use crate::status::{PeerStatus, Status, VolumeStatus};
 use crate::streams::Media;
 
 const HELLO_RETRY_NS: Nanos = 1_000_000_000;
+/// How long a datagram from another SoundSync version keeps its warning up.
+const OTHER_VERSION_WARNING_NS: Nanos = 10_000_000_000;
 const STATUS_EVERY_NS: Nanos = 100_000_000;
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,6 +65,8 @@ pub(crate) struct Node {
     last_status: Nanos,
     /// Device added/removed/default-changed notifications from the audio host.
     pub device_events: Option<Receiver<DeviceEvent>>,
+    /// Device notifications so far (the UI refreshes its device lists when this moves).
+    pub device_event_count: u64,
     _device_watch: Option<Box<dyn Send>>,
     gap_host: GapDetector,
     gap_wall: GapDetector,
@@ -123,6 +128,7 @@ impl Node {
             last_hello: HashMap::new(),
             last_status: 0,
             device_events: None,
+            device_event_count: 0,
             _device_watch: None,
             gap_host: GapDetector::default(),
             gap_wall: GapDetector::default(),
@@ -276,6 +282,12 @@ impl Node {
             return;
         }
         match control {
+            Control::ListInputs => self.send(from, &Control::Inputs(self.input_list())),
+            Control::Inputs(list) => {
+                if let Some(p) = self.peers.get_mut(sender) {
+                    p.inputs = Some(list);
+                }
+            }
             Control::Calib(msg) => self.handle_calib(sender, msg, arrival_ns),
             Control::SyncTest { active, epoch_ns } => self.on_sync_test(sender, active, epoch_ns),
             other => tracing::debug!("unhandled control message {other:?}"),
@@ -299,8 +311,13 @@ impl Node {
                     self.warn("calibration: the chosen microphone node is not connected");
                 }
             }
-            Command::ApplyCalibration => self.apply_calibration(),
+            Command::ApplyCalibration { match_volumes } => self.apply_calibration(match_volumes),
             Command::CancelCalibration => self.cancel_calibration(),
+            Command::ListInputs(node) => {
+                if let Some(p) = self.peers.get(node) {
+                    self.send(p.addr, &Control::ListInputs);
+                }
+            }
             other => tracing::info!("command {other:?}: not handled"),
         }
     }
@@ -319,18 +336,40 @@ impl Node {
         if !self.peers.is_empty() {
             self.first_unanswered = None;
         }
-        let last = self.counters.last_authenticated_ns.load(Ordering::Relaxed);
-        self.inbound_ok = !inbound_suspect(now, self.first_unanswered, (last != 0).then_some(last));
+        self.inbound_ok = !inbound_suspect(now, self.first_unanswered, self.counters.last_heard_ns());
+    }
+
+    /// This node's connected microphones, as many as fit in one answer.
+    fn input_list(&self) -> InputList {
+        let devices = self.host.devices(Direction::Capture).unwrap_or_default();
+        let mut list = InputList {
+            default: devices.iter().find(|d| d.is_default && d.active).map(|d| d.name.clone()),
+            devices: devices.iter().filter(|d| d.active).map(|d| d.name.clone()).collect(),
+        };
+        while !list.devices.is_empty() && !control_fits(&Control::Inputs(list.clone())) {
+            list.devices.pop();
+        }
+        list
+    }
+
+    /// Notes on current conditions that need no action (recomputed for every status).
+    fn condition_notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.silence_suspect {
+            let device = self.capture_device_name().unwrap_or_default();
+            notes.push(format!("{device} is silent: apps have it open but nothing is playing (or an app uses exclusive mode or protected audio)"));
+        }
+        notes
     }
 
     /// Warnings that reflect a current condition (recomputed for every status).
-    fn condition_warnings(&self) -> Vec<String> {
+    fn condition_warnings(&self, now: Nanos) -> Vec<String> {
         let mut w = self.layout_warnings();
-        if self.silence_suspect {
-            let device = self.capture_device_name().unwrap_or_default();
-            w.push(format!(
-                "Apps are playing to {device} but SoundSync hears silence — an app may be using exclusive mode or protected (DRM) audio"
-            ));
+        if let Some(o) = *self.counters.other_version.lock().unwrap()
+            && now - o.at_ns < OTHER_VERSION_WARNING_NS
+        {
+            let which = if o.version < PROTOCOL_VERSION { "an older" } else { "a newer" };
+            w.push(format!("The SoundSync at {} runs a different version ({which} one) — install the same version on every device", o.from));
         }
         if !self.inbound_ok {
             w.push(if cfg!(target_os = "macos") {
@@ -418,9 +457,13 @@ impl Node {
                     extra_latency_ns: p.state.as_ref().map_or(0, |s| s.extra_latency_ns),
                     output: p.state.as_ref().and_then(|s| s.output.clone()),
                     rx: p.state.as_ref().map_or_else(Vec::new, |s| s.rx.clone()),
+                    volume: p.state.as_ref().map(|s| VolumeStatus { volume: s.volume, muted: s.muted, device: s.device_volume }),
+                    inputs: p.inputs.clone(),
                 })
                 .collect(),
-            warnings: self.warnings.iter().cloned().chain(self.condition_warnings()).collect(),
+            warnings: self.warnings.iter().cloned().chain(self.condition_warnings(now)).collect(),
+            notes: self.condition_notes(),
+            device_events: self.device_event_count,
             inbound_ok: self.inbound_ok,
             volume: self.config.playback.volume,
             muted: self.config.playback.muted,

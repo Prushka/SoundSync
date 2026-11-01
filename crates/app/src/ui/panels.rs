@@ -3,18 +3,19 @@
 use eframe::egui::{self, Color32, RichText};
 use soundsync_audio::DeviceInfo;
 use soundsync_core::layout::describe;
+use soundsync_core::protocol::VolumeChange;
 use soundsync_core::{MasterMode, Nanos, NodeId, Os};
-use soundsync_engine::{CalibStatus, Command, Status};
+use soundsync_engine::{CalibStatus, Command, Status, VolumeStatus};
 
 use super::app::{SoundSyncApp, Tab};
-use super::format::{fmt_ms, fmt_opt_ms, role_label, sync_label, tray_status_line};
+use super::format::{fmt_level, fmt_ms, fmt_opt_ms, role_label, sync_label, tray_status_line};
 
 const WARN: Color32 = Color32::from_rgb(0xB2, 0x6A, 0x00);
 
 pub fn draw(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
     egui::Panel::top("header").show(ui, |ui| header(app, ui));
     egui::CentralPanel::default().show(ui, |ui| {
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.tab {
+        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match app.tab {
             Tab::Overview => overview(app, ui),
             Tab::Sync => sync(app, ui),
             Tab::Settings => settings(app, ui),
@@ -76,22 +77,26 @@ pub fn open_folder(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
 
-/// A device picker; returns the new configured value when the user picks one.
-fn device_combo(ui: &mut egui::Ui, id: &str, current: &str, devices: &[DeviceInfo], extra: &[(&str, &str)]) -> Option<String> {
+/// A device picker with a refresh button; returns the new configured value when the user picks
+/// one, and sets `refresh` when they ask for fresh device lists.
+fn device_combo(ui: &mut egui::Ui, id: &str, current: &str, devices: &[DeviceInfo], extra: &[(&str, &str)], refresh: &mut bool) -> Option<String> {
     let shown = if current.trim().is_empty() { "Default".to_string() } else { current.to_string() };
     let mut picked = None;
-    egui::ComboBox::from_id_salt(id).width(360.0).selected_text(shown).show_ui(ui, |ui| {
-        for (value, label) in extra {
-            if ui.selectable_label(current == *value, *label).clicked() {
-                picked = Some(value.to_string());
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(id).width(360.0).selected_text(shown).show_ui(ui, |ui| {
+            for (value, label) in extra {
+                if ui.selectable_label(current == *value, *label).clicked() {
+                    picked = Some(value.to_string());
+                }
             }
-        }
-        for d in devices.iter().filter(|d| d.active) {
-            let label = format!("{}  ({} {} kHz)", d.name, describe(d.mix_format), d.mix_format.sample_rate / 1000);
-            if ui.selectable_label(current == d.name, label).clicked() {
-                picked = Some(d.name.clone());
+            for d in devices.iter().filter(|d| d.active) {
+                let label = format!("{}  ({} {} kHz)", d.name, describe(d.mix_format), d.mix_format.sample_rate / 1000);
+                if ui.selectable_label(current == d.name, label).clicked() {
+                    picked = Some(d.name.clone());
+                }
             }
-        }
+        });
+        *refresh |= ui.small_button("🔄").on_hover_text("Refresh the device lists (they also refresh by themselves when devices change)").clicked();
     });
     picked
 }
@@ -126,33 +131,41 @@ fn this_pc(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
             app.command(Command::SetMasterMode(mode));
         }
     });
+    let mut refresh = false;
     egui::Grid::new("this_pc").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Capture");
         let current = if config.master.capture_device.is_empty() && mode == MasterMode::Virtual { "CABLE Input".to_string() } else { config.master.capture_device.clone() };
-        if let Some(d) = device_combo(ui, "capture", &current, &app.render_devices, &[]) {
+        if let Some(d) = device_combo(ui, "capture", &current, &app.render_devices, &[], &mut refresh) {
             app.command(Command::SetCaptureDevice(d));
         }
         ui.end_row();
         if mode == MasterMode::Virtual {
             ui.label("Monitor output");
-            if let Some(d) = device_combo(ui, "monitor", &config.master.monitor_device, &app.render_devices, &[("", "Default"), ("null", "None (don't play here)")]) {
+            if let Some(d) = device_combo(ui, "monitor", &config.master.monitor_device, &app.render_devices, &[("", "Default"), ("null", "None (don't play here)")], &mut refresh) {
                 app.command(Command::SetMonitorDevice(d));
             }
             ui.end_row();
         }
     });
+    if refresh {
+        app.refresh_devices();
+    }
     super::vbcable::panel(app, ui, &config, mode);
     if let Some(c) = &st.capture {
         ui.label(RichText::new(format!("Capturing {}: {} {} Hz · delay {}", c.name, describe(c.format), c.format.sample_rate, fmt_opt_ms(st.delay_ns))).weak());
+    }
+    for note in &st.notes {
+        ui.label(RichText::new(format!("ℹ {note}")).weak());
     }
 }
 
 fn playback(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
     ui.heading("Playback");
     let config = app.config.clone();
+    let mut refresh = false;
     egui::Grid::new("playback").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Output");
-        if let Some(d) = device_combo(ui, "output", &config.playback.output_device, &app.render_devices, &[("", "Default")]) {
+        if let Some(d) = device_combo(ui, "output", &config.playback.output_device, &app.render_devices, &[("", "Default")], &mut refresh) {
             app.command(Command::SetOutputDevice(d));
         }
         ui.end_row();
@@ -162,11 +175,14 @@ fn playback(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
             Some(device) => format!("The volume of {device} itself: the same slider as in the system's sound settings"),
             None => "SoundSync's own level (this output has no volume control of its own)".to_string(),
         };
-        if ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix("%")).on_hover_text(what).changed() {
+        if ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).fixed_decimals(0).suffix("%")).on_hover_text(what).changed() {
             app.command(Command::SetVolume(percent / 100.0));
         }
         ui.end_row();
     });
+    if refresh {
+        app.refresh_devices();
+    }
     ui.horizontal(|ui| {
         let mut muted = st.muted;
         let mute_hint = st.volume_device.as_ref().map_or_else(|| "Mutes SoundSync on this PC".to_string(), |d| format!("Mutes {d}"));
@@ -211,10 +227,37 @@ fn extra_editor(app: &mut SoundSyncApp, ui: &mut egui::Ui, node: NodeId, current
     }
 }
 
+/// A node's Volume slider and mute, editable from here (any node's, like its extra latency).
+fn volume_editor(app: &mut SoundSyncApp, ui: &mut egui::Ui, node: NodeId, name: &str, reported: Option<VolumeStatus>) {
+    let Some(v) = reported else {
+        ui.label("—");
+        return;
+    };
+    // While the slider moves, and briefly after, show the value being set rather than the last
+    // reported one (which catches up within a moment).
+    let held = app.drafts.volume.get(&node).filter(|(_, at)| at.elapsed() < std::time::Duration::from_millis(1500)).map(|(p, _)| *p);
+    let mut percent = held.unwrap_or((v.volume * 100.0).round());
+    let what = if v.device { format!("{name}'s output volume (the system's slider)") } else { format!("SoundSync's level on {name} (its output has no volume control)") };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = 90.0;
+        let resp = ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).fixed_decimals(0).suffix("%")).on_hover_text(what);
+        if resp.changed() || resp.dragged() {
+            app.drafts.volume.insert(node, (percent, std::time::Instant::now()));
+        }
+        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            app.command(Command::ChangeVolume { node, change: VolumeChange::Set(percent / 100.0) });
+        }
+        let mut muted = v.muted;
+        if ui.toggle_value(&mut muted, "🔇").on_hover_text(format!("Mute {name}")).changed() {
+            app.command(Command::ChangeVolume { node, change: VolumeChange::Muted(muted) });
+        }
+    });
+}
+
 fn group_table(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
     ui.heading("Group");
-    egui::Grid::new("group").striped(true).num_columns(7).spacing([14.0, 6.0]).show(ui, |ui| {
-        for h in ["Name", "OS", "Role", "RTT", "Output latency", "Extra latency", "Sync"] {
+    egui::Grid::new("group").striped(true).num_columns(8).spacing([14.0, 6.0]).show(ui, |ui| {
+        for h in ["Name", "OS", "Role", "RTT", "Output latency", "Volume", "Extra latency", "Sync"] {
             ui.label(RichText::new(h).strong());
         }
         ui.end_row();
@@ -223,6 +266,8 @@ fn group_table(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
         ui.label(role_label(if st.broadcasting { soundsync_core::Role::Master(st.master_mode) } else { soundsync_core::Role::Receiver }));
         ui.label("—");
         ui.label(st.output.as_ref().map_or("—".into(), |o| fmt_ms(o.latency_ns)));
+        let own = VolumeStatus { volume: st.volume, muted: st.muted, device: st.volume_device.is_some() };
+        volume_editor(app, ui, st.node_id, "this PC", Some(own));
         extra_editor(app, ui, st.node_id, st.extra_latency_ns);
         ui.label(st.streams.iter().find(|s| s.master != st.node_id).map_or("—".into(), sync_label));
         ui.end_row();
@@ -231,7 +276,11 @@ fn group_table(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
             ui.label(format!("{:?}", p.os));
             ui.label(role_label(p.role));
             ui.label(fmt_opt_ms(p.rtt_ns));
-            ui.label(p.output.as_ref().map_or("—".into(), |o| format!("{} ({})", fmt_ms(o.device_latency_ns), o.device)));
+            match &p.output {
+                Some(o) => ui.label(fmt_ms(o.device_latency_ns)).on_hover_text(&o.device),
+                None => ui.label("—"),
+            };
+            volume_editor(app, ui, p.id, &p.name, p.volume);
             extra_editor(app, ui, p.id, p.extra_latency_ns);
             let rx = p.rx.iter().find(|r| r.master != p.id);
             ui.label(rx.map_or("—".into(), |r| if r.behind_ns > 0 { format!("Behind {:.0} ms", r.behind_ns as f64 / 1e6) } else { format!("±{:.1} ms", r.sync_error_ns.abs() as f64 / 1e6) }));
@@ -275,18 +324,24 @@ fn sync(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
 
 fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
     ui.heading("Auto-calibrate with a microphone");
-    ui.label("Place a microphone where you listen. The speakers take turns playing a short sweep, three times each; SoundSync measures when each one arrives and corrects the extra latencies. Check measures what is left afterwards. Avoid Bluetooth headset microphones.");
+    ui.label("Place a microphone where you listen. The speakers take turns playing a short sweep, three times each; SoundSync measures when and how loud each one arrives, corrects the extra latencies and turns louder speakers down to the quietest one. Check measures what is left afterwards. Avoid Bluetooth headset microphones.");
     let mic_node = app.drafts.mic_node.unwrap_or(st.node_id);
     egui::Grid::new("calib").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Microphone on");
         let name = if mic_node == st.node_id { format!("{} (this PC)", st.name) } else { st.peers.iter().find(|p| p.id == mic_node).map_or("?".into(), |p| p.name.clone()) };
         egui::ComboBox::from_id_salt("mic_node").selected_text(name).show_ui(ui, |ui| {
+            let mut choose = |node: NodeId| {
+                if node != mic_node {
+                    app.drafts.mic_device = String::new(); // each node has its own microphones
+                }
+                app.drafts.mic_node = Some(node);
+            };
             if ui.selectable_label(mic_node == st.node_id, format!("{} (this PC)", st.name)).clicked() {
-                app.drafts.mic_node = Some(st.node_id);
+                choose(st.node_id);
             }
             for p in &st.peers {
                 if ui.selectable_label(mic_node == p.id, &p.name).clicked() {
-                    app.drafts.mic_node = Some(p.id);
+                    choose(p.id);
                 }
             }
         });
@@ -294,11 +349,35 @@ fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
         ui.label("Microphone");
         if mic_node == st.node_id {
             let current = app.drafts.mic_device.clone();
-            if let Some(d) = device_combo(ui, "mic", &current, &app.capture_devices, &[("", "Default")]) {
+            let mut refresh = false;
+            if let Some(d) = device_combo(ui, "mic", &current, &app.capture_devices, &[("", "Default")], &mut refresh) {
                 app.drafts.mic_device = d;
             }
+            if refresh {
+                app.refresh_devices();
+            }
         } else {
-            ui.add(egui::TextEdit::singleline(&mut app.drafts.mic_device).hint_text("default microphone on that PC"));
+            let peer = st.peers.iter().find(|p| p.id == mic_node);
+            match peer.and_then(|p| p.inputs.as_ref()) {
+                Some(list) => {
+                    let default = list.default.as_deref().map_or("Default".to_string(), |d| format!("Default ({d})"));
+                    let current = app.drafts.mic_device.clone();
+                    let shown = if current.is_empty() { default.clone() } else { current.clone() };
+                    egui::ComboBox::from_id_salt("remote_mic").width(360.0).selected_text(shown).show_ui(ui, |ui| {
+                        if ui.selectable_label(current.is_empty(), default).clicked() {
+                            app.drafts.mic_device = String::new();
+                        }
+                        for d in &list.devices {
+                            if ui.selectable_label(current == *d, d).clicked() {
+                                app.drafts.mic_device = d.clone();
+                            }
+                        }
+                    });
+                }
+                None => {
+                    ui.label(RichText::new(format!("asking {} for its microphones…", peer.map_or("it", |p| p.name.as_str()))).weak());
+                }
+            }
         }
         ui.end_row();
     });
@@ -325,9 +404,11 @@ fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
         if let CalibStatus::Done { check, .. } = &st.calibration {
             let label = if *check { "Correct these" } else { "Apply" };
             if ui.button(label).clicked() {
-                app.command(Command::ApplyCalibration);
+                app.command(Command::ApplyCalibration { match_volumes: app.drafts.match_volumes });
                 app.notice = Some("Corrections applied. Run Check to measure what is left.".into());
             }
+            ui.checkbox(&mut app.drafts.match_volumes, "Also match volumes")
+                .on_hover_text("Turns every speaker that arrived louder down to the quietest one (by its own volume)");
         }
     });
     match &st.calibration {
@@ -342,11 +423,12 @@ fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
             ui.label(if *check {
                 "Left over (one sweep each; within 1 ms is in sync):"
             } else {
-                "Measured corrections (Apply adds them to the extra latencies):"
+                "Measured corrections (Apply adds them to the extra latencies and turns louder speakers down):"
             });
-            egui::Grid::new("calib_result").striped(true).num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
+            egui::Grid::new("calib_result").striped(true).num_columns(5).spacing([16.0, 4.0]).show(ui, |ui| {
                 ui.label(RichText::new("Speaker").strong());
                 ui.label(RichText::new(if *check { "Off by" } else { "Correction" }).strong());
+                ui.label(RichText::new("Level").strong()).on_hover_text("How much louder than the quietest speaker it arrived");
                 ui.label(RichText::new("Signal").strong());
                 ui.label(RichText::new("").strong());
                 ui.end_row();
@@ -354,6 +436,7 @@ fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
                     let name = if r.node == st.node_id { st.name.clone() } else { st.peers.iter().find(|p| p.id == r.node).map_or("?".into(), |p| p.name.clone()) };
                     ui.label(name);
                     ui.label(format!("{:+.1} ms", r.delta_ns as f64 / 1e6));
+                    ui.label(fmt_level(r.level_db));
                     ui.label(super::format::fmt_snr(r.snr_db));
                     let (note, ok) = super::format::calib_note(r, *check);
                     ui.label(if ok { RichText::new(note) } else { RichText::new(format!("⚠ {note}")).color(WARN) });

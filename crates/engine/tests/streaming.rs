@@ -367,3 +367,17 @@ fn oversized_datagrams_do_not_stall_the_receiver() {
     r1.shutdown();
     m.shutdown();
 }
+
+#[test]
+fn a_node_running_another_version_is_reported() {
+    let n = spawn("n", FakeClock::default(), |_| {});
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    // A version 1 datagram: our magic, then the old version byte.
+    let mut old = b"SSYN".to_vec();
+    old.push(1);
+    old.extend([1u8; 40]);
+    sock.send_to(&old, n.engine.local_addr()).unwrap();
+    let warned = || n.engine.status().warnings.iter().any(|w| w.contains("127.0.0.1") && w.contains("different version"));
+    assert!(wait_until(Duration::from_secs(3), warned), "{:?}", n.engine.status().warnings);
+    n.shutdown();
+}

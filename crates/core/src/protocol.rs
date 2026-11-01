@@ -18,7 +18,8 @@ use crate::calib::CalibResult;
 use crate::types::{MasterMode, Nanos, NodeId, Os, Role, StreamFormat};
 
 pub const MAGIC: [u8; 4] = *b"SSYN";
-pub const PROTOCOL_VERSION: u8 = 1;
+/// 2: volumes in node state, remote volume, microphone lists, levels in calibration results.
+pub const PROTOCOL_VERSION: u8 = 2;
 pub const HEADER_LEN: usize = 14;
 pub const AUDIO_HEADER_LEN: usize = 49;
 pub const TAG_LEN: usize = 8;
@@ -125,13 +126,40 @@ pub struct NodeState {
     pub required_delay_ns: Nanos,
     /// Plays other masters' streams (so a new stream's group delay must already cover it).
     pub plays_remote: bool,
+    /// The node's Volume slider (0..=1) and mute.
+    pub volume: f32,
+    pub muted: bool,
+    /// The slider is the output device's own volume (else SoundSync's level on that node).
+    pub device_volume: bool,
     pub rx: Vec<RxStat>,
 }
+
+/// A change to a node's volume, made from any node.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum VolumeChange {
+    /// Moves the Volume slider (0..=1).
+    Set(f32),
+    Muted(bool),
+    /// Turns the node down by this many dB from wherever it is (volume matching).
+    TurnDown { db: f32 },
+}
+
+/// A node's connected microphones (and line inputs).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputList {
+    pub default: Option<String>,
+    pub devices: Vec<String>,
+}
+
+/// Largest single turn-down volume matching asks for.
+pub const MAX_TURN_DOWN_DB: f32 = 60.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CalibSignal {
     Sweep,
     Click { freq_hz: u16 },
+    /// Soft noise that wakes TVs and soundbars muted by silence before the sweeps.
+    Wake,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -153,6 +181,10 @@ pub enum Control {
     Subscribe { stream_id: u32 },
     Unsubscribe { stream_id: u32 },
     SetOffset { target: NodeId, extra_latency_ns: Nanos },
+    SetVolume { target: NodeId, change: VolumeChange },
+    /// Asks a node for its microphones; it answers with `Inputs`.
+    ListInputs,
+    Inputs(InputList),
     Calib(CalibMsg),
     SyncTest { active: bool, epoch_ns: Nanos },
 }
@@ -186,6 +218,12 @@ pub enum DecodeError {
     UnknownType(u8),
     #[error("malformed packet body")]
     Malformed,
+}
+
+/// Whether `c` fits in one datagram.
+pub fn control_fits(c: &Control) -> bool {
+    let mut room = [0u8; MAX_DATAGRAM - HEADER_LEN - TAG_LEN];
+    postcard::to_slice(c, &mut room).is_ok()
 }
 
 /// Frames of `channels`-channel f32 audio that fit in one packet.
@@ -344,8 +382,13 @@ fn control_ok(c: &Control) -> bool {
         Control::State(s) => {
             s.stream.as_ref().is_none_or(|i| i.format.is_valid() && i.presentation_offset_ns.abs() <= MAX_OFFSET_NS)
                 && s.output.as_ref().is_none_or(|o| o.format.is_valid())
+                && (0.0..=1.0).contains(&s.volume)
         }
-        Control::Calib(CalibMsg::Result { results, .. }) => results.iter().all(|r| !r.snr_db.is_nan() && r.heard <= r.sweeps),
+        Control::SetVolume { change: VolumeChange::Set(v), .. } => (0.0..=1.0).contains(v),
+        Control::SetVolume { change: VolumeChange::TurnDown { db }, .. } => (0.0..=MAX_TURN_DOWN_DB).contains(db),
+        Control::Calib(CalibMsg::Result { results, .. }) => {
+            results.iter().all(|r| !r.snr_db.is_nan() && r.level_db.is_finite() && r.level_spread_db.is_finite() && !r.peak_dbfs.is_nan() && r.heard <= r.sweeps)
+        }
         _ => true,
     }
 }
@@ -474,6 +517,9 @@ mod tests {
                 extra_latency_ns: -3_000_000,
                 required_delay_ns: 61_000_000,
                 plays_remote: true,
+                volume: 0.72,
+                muted: true,
+                device_volume: true,
                 rx: vec![
                     RxStat { master: 1, stream_id: 2, sync_error_ns: -150, behind_ns: 0, lost_frames: 4 },
                     RxStat { master: 3, stream_id: 4, sync_error_ns: 90, behind_ns: 45_000_000, lost_frames: 0 },
@@ -482,16 +528,22 @@ mod tests {
             Control::Subscribe { stream_id: 5 },
             Control::Unsubscribe { stream_id: 6 },
             Control::SetOffset { target: 42, extra_latency_ns: 25_000_000 },
+            Control::SetVolume { target: 42, change: VolumeChange::Set(0.35) },
+            Control::SetVolume { target: 42, change: VolumeChange::Muted(true) },
+            Control::SetVolume { target: 42, change: VolumeChange::TurnDown { db: 4.5 } },
+            Control::ListInputs,
+            Control::Inputs(InputList { default: Some("MacBook Pro Microphone".into()), devices: vec!["MacBook Pro Microphone".into(), "AirPods".into()] }),
             Control::Calib(CalibMsg::Request { mic_device: "Microphone".into(), check: true }),
             Control::Calib(CalibMsg::Begin { session: 1, until_ns: 10 }),
             Control::Calib(CalibMsg::Play { session: 1, at_ns: 11, signal: CalibSignal::Sweep }),
             Control::Calib(CalibMsg::Play { session: 1, at_ns: 12, signal: CalibSignal::Click { freq_hz: 800 } }),
+            Control::Calib(CalibMsg::Play { session: 1, at_ns: 13, signal: CalibSignal::Wake }),
             Control::Calib(CalibMsg::End { session: 1 }),
             Control::Calib(CalibMsg::Result {
                 session: 1,
                 results: vec![
-                    CalibResult { node: 1, delta_ns: -35_000_000, snr_db: 41.5, spread_ns: 120_000, heard: 3, sweeps: 3 },
-                    CalibResult { node: 2, delta_ns: 145_000_000, snr_db: 27.0, spread_ns: 0, heard: 1, sweeps: 3 },
+                    CalibResult { node: 1, delta_ns: -35_000_000, snr_db: 41.5, spread_ns: 120_000, heard: 3, sweeps: 3, level_db: 0.0, peak_dbfs: -12.5, level_spread_db: 0.4 },
+                    CalibResult { node: 2, delta_ns: 145_000_000, snr_db: 27.0, spread_ns: 0, heard: 1, sweeps: 3, level_db: 4.5, peak_dbfs: -3.1, level_spread_db: 0.0 },
                 ],
                 check: false,
                 error: Some("no signal from TV".into()),
@@ -523,6 +575,9 @@ mod tests {
                 extra_latency_ns: 0,
                 required_delay_ns: 0,
                 plays_remote: true,
+                volume: 1.0,
+                muted: false,
+                device_volume: true,
                 rx: Vec::new(),
             })
         };
@@ -539,6 +594,20 @@ mod tests {
             let n = encode(5, &Packet::Control(state(format, offset)), &key, &mut buf).unwrap();
             assert_eq!(decode(&buf[..n], &key), Err(DecodeError::Malformed), "{format:?} offset {offset}");
         }
+        let Control::State(good_state) = state(good, 80_000_000) else { unreachable!() };
+        let calib_result = |level_db: f32| CalibResult { node: 1, delta_ns: 0, snr_db: 40.0, spread_ns: 0, heard: 3, sweeps: 3, level_db, peak_dbfs: -12.0, level_spread_db: 0.0 };
+        for control in [
+            Control::State(NodeState { volume: 1.5, ..good_state.clone() }),
+            Control::State(NodeState { volume: f32::NAN, ..good_state }),
+            Control::SetVolume { target: 1, change: VolumeChange::Set(-0.1) },
+            Control::SetVolume { target: 1, change: VolumeChange::Set(f32::NAN) },
+            Control::SetVolume { target: 1, change: VolumeChange::TurnDown { db: -3.0 } },
+            Control::SetVolume { target: 1, change: VolumeChange::TurnDown { db: f32::INFINITY } },
+            Control::Calib(CalibMsg::Result { session: 1, results: vec![calib_result(f32::NAN)], check: false, error: None }),
+        ] {
+            let n = encode(5, &Packet::Control(control.clone()), &key, &mut buf).unwrap();
+            assert_eq!(decode(&buf[..n], &key), Err(DecodeError::Malformed), "{control:?}");
+        }
         for header in [
             AudioHeader { format: StreamFormat { channels: 4_000, ..good }, ..hdr() },
             AudioHeader { volume: 2.0, ..hdr() },
@@ -548,6 +617,30 @@ mod tests {
             let n = encode(5, &Packet::Silent { header }, &key, &mut buf).unwrap();
             assert_eq!(decode(&buf[..n], &key), Err(DecodeError::Malformed), "{header:?}");
         }
+    }
+
+    #[test]
+    fn another_protocol_version_is_reported_as_such() {
+        // Version 1 (before volumes and microphone lists) cannot be read: say so instead of
+        // failing as a corrupt packet, so the user can be told to update.
+        let key = GroupKey::derive("home", "");
+        let mut buf = [0u8; MAX_DATAGRAM];
+        let n = encode(5, &Packet::Control(Control::Ping { t1: 1 }), &key, &mut buf).unwrap();
+        assert_eq!(PROTOCOL_VERSION, 2);
+        buf[4] = 1;
+        assert_eq!(decode(&buf[..n], &key), Err(DecodeError::BadVersion(1)));
+    }
+
+    #[test]
+    fn control_fits_tells_whether_a_message_fits_a_datagram() {
+        let list = |n: usize| Control::Inputs(InputList { default: None, devices: vec!["Microphone (USB Audio Device)".into(); n] });
+        assert!(control_fits(&list(3)));
+        assert!(!control_fits(&list(100)));
+        let key = GroupKey::derive("home", "");
+        let mut buf = [0u8; MAX_DATAGRAM];
+        let largest = (1..100).take_while(|&n| control_fits(&list(n))).last().unwrap();
+        assert!(encode(1, &Packet::Control(list(largest)), &key, &mut buf).is_ok());
+        assert_eq!(encode(1, &Packet::Control(list(largest + 1)), &key, &mut buf), Err(EncodeError::TooLarge));
     }
 
     #[test]

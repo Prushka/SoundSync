@@ -45,6 +45,7 @@ impl Node {
     /// Every engine tick: notices lost devices (OS events or dead streams) and reopens them.
     pub(crate) fn devices_tick(&mut self, now: Nanos) {
         let events: Vec<DeviceEvent> = self.device_events.as_ref().map_or_else(Vec::new, |rx| rx.try_iter().collect());
+        self.device_event_count += events.len() as u64;
         let mut follow_default = false;
         for e in events {
             match e {

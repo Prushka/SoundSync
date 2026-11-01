@@ -70,8 +70,8 @@ Starting SoundSync again brings up the running instance's window.
 Neither the installer nor SoundSync writes to the registry, and there is no *Apps & features* entry. What
 SoundSync changes, only at your request: the Windows default output (only with **Switch Windows default output
 to VB-CABLE while broadcasting**; restored when broadcasting stops, on exit, when Windows shuts down and after
-a crash), the Startup shortcut, and the output's own volume and mute when you move SoundSync's **Volume**
-slider or tick **Mute**.
+a crash), the Startup shortcut, and the output's own volume and mute when you (or another device in the
+group, or volume matching) move SoundSync's **Volume** slider or tick **Mute**.
 
 ### Volume
 
@@ -80,6 +80,10 @@ sound settings (or macOS's): moving either moves both. With **Follow master volu
 also get quieter when the volume is turned down on the PC that broadcasts them, by the same amount in decibels
 as on that PC (in VB-CABLE mode that is CABLE Input's volume, which the volume keys change while CABLE Input
 is the default output).
+
+Every device's Volume and mute can also be changed from any other device, in the **Volume** column of the
+**Overview** group table (like extra latency). Microphone calibration can match the speakers' volumes for you
+(see [Calibration](#calibration)).
 
 ### Updating
 
@@ -198,16 +202,26 @@ the **Overview** group table.
 
 - **Sync test** (Sync tab): every speaker clicks once a second at the same moment, each at its own pitch.
   Adjust the extra latencies until the clicks sound like one. A speaker that clicks late needs a larger value.
-- **Auto-calibrate with a microphone** (Sync tab): choose a device with a microphone and place it where you
-  listen (speakers are aligned for that spot; sound travels about 34 cm per millisecond). **Start**: the
-  speakers take turns playing a short sweep, three times each. SoundSync finds when each sweep arrived (the
-  earliest strong arrival, so a louder reflection off a wall does not count), takes each speaker's median and
-  shows the corrections with each speaker's signal strength. A speaker is flagged when its sweeps disagree by
-  more than 1 ms, when one was not heard, or when the signal is weak (below 30 dB). **Apply** adds the
-  corrections to the extra latencies; **Check** then plays one sweep per speaker and shows what is left
-  (within 1 ms is in sync). The microphone's own delay cancels out, since every speaker is measured through it.
-  Use a built-in or USB microphone: Bluetooth headset microphones change the headset's own latency while they
-  are in use.
+- **Auto-calibrate with a microphone** (Sync tab): choose any device in the group, then one of its
+  microphones, and place it where you listen (speakers are aligned for that spot; sound travels about 34 cm
+  per millisecond). **Start**: every speaker plays a soft "shh" first (TVs and soundbars mute after a while of
+  silence and would swallow the first sweep), then the speakers take turns playing a short sweep, three times
+  each. SoundSync finds when each sweep arrived (the earliest strong arrival, so a louder reflection off a wall
+  does not count) and how loud it was, takes each speaker's median, and shows the corrections, each speaker's
+  **Level** (how much louder than the quietest speaker it arrived) and its signal strength.
+  **Apply** adds the corrections to the extra latencies and, with **Also match volumes** (on by default),
+  turns every louder speaker down by its Level using that speaker's own volume, so all of them are as loud as
+  the quietest one. **Check** then plays one sweep per speaker and shows what is left (within 1 ms and 1 dB is
+  in sync); **Correct these** applies that too.
+
+  A speaker is flagged when its sweeps disagree by more than 1 ms, when one was not heard, when the signal is
+  weak (below 30 dB), when the microphone was overloaded (peaks above -6 dBFS), or when a speaker's level
+  varied by more than 2 dB between sweeps. The last one is typical of webcams and cameras: their microphones
+  adjust their own gain, which squeezes level differences (one measured a 10.5 dB step as 7 dB). Matching then
+  turns speakers down too little, never too much: run **Check** and **Correct these** again until the levels
+  are within 1 dB, or use a microphone without automatic gain. The microphone's own delay and level cancel out,
+  since every speaker is measured through it. Bluetooth headset microphones change the headset's own latency
+  while they are in use; use another one.
 
 Bluetooth delays drift a little between connections. Rerun the calibration if a Bluetooth speaker sounds out
 of sync after reconnecting.
@@ -220,9 +234,11 @@ of sync after reconnecting.
 | No devices found / No replies … Local Network (macOS) | System Settings ▸ Privacy & Security ▸ Local Network ▸ enable SoundSync. |
 | VB-CABLE (CABLE Input) not found — install it or switch to Direct mode | Use **Set up VB-CABLE…**, or switch the master to Direct mode. |
 | *device*: 7.1 → 5.1 (channels remapped; match the speaker layouts in Sound settings) | The source and this output have different speaker layouts. SoundSync up- or downmixes, but for exact playback set both to the same layout (**Configure speakers…**). |
-| Apps are playing to … but SoundSync hears silence | An app is using exclusive mode or protected (DRM) audio, which Windows does not let anyone capture. Turn off exclusive mode for that app or device. |
+| ℹ CABLE Input is silent: apps have it open but nothing is playing … | Usually nothing is playing (a paused video keeps its app's audio open). If something *is* playing, that app uses exclusive mode or protected (DRM) audio, which Windows does not let anyone capture: turn off exclusive mode for that app or device. |
+| The SoundSync at *address* runs a different version — install the same version on every device | Devices only talk to the same SoundSync version. Update the older one (both the Windows and the Mac builds come from the same release). |
 | Behind N ms (Direct mode) | That device cannot play as early as the master's speaker. Switch the master to VB-CABLE mode for full sync. |
 | *name* not found — using default output | The configured device is missing; pick another one in the window. |
+| A device you just plugged in is not in a list | Lists refresh by themselves when Windows or macOS reports a change; the 🔄 button next to each list refreshes them by hand. |
 
 Logs are in the folders listed under [Configuration](#configuration); a session that crashed is kept with a
 `-recovered` suffix.

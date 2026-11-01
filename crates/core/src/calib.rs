@@ -41,6 +41,28 @@ pub fn calibration_sweep(sample_rate: u32) -> Vec<f32> {
     log_sweep(sample_rate, 0.1, 200.0, 8000.0)
 }
 
+/// Peak of [`wake_noise`] (about -30 dBFS): a soft "shh".
+pub const WAKE_LEVEL: f32 = 0.03;
+
+/// One second of soft noise, faded in and out. Played before calibration sweeps: TVs and
+/// soundbars mute after a while of silence and lose the start of the next sound.
+pub fn wake_noise(sample_rate: u32) -> Vec<f32> {
+    let n = sample_rate as usize;
+    let fade = n / 10;
+    let mut s: u64 = 0x2545_F491_4F6C_DD1D;
+    (0..n)
+        .map(|i| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let white = (s >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+            let edge = i.min(n - 1 - i);
+            let env = if edge < fade { 0.5 - 0.5 * (std::f64::consts::PI * edge as f64 / fade as f64).cos() } else { 1.0 };
+            (WAKE_LEVEL as f64 * env * white) as f32
+        })
+        .collect()
+}
+
 /// 10 ms Hann-windowed sine burst, amplitude 0.5 (sync-test click).
 pub fn click(sample_rate: u32, freq_hz: f64) -> Vec<f32> {
     let n = (sample_rate / 100) as usize;
@@ -57,6 +79,11 @@ pub struct Detection {
     /// Position of the reference's first sample within the recording (fractional frames).
     pub offset_frames: f64,
     pub snr_db: f32,
+    /// How loud the arrival is: its mean square over the reference's length (its echoes for a
+    /// fifth of that length included), with the noise before it taken out; dB re full scale.
+    pub level_db: f32,
+    /// Loudest sample of the arrival, dBFS.
+    pub peak_dbfs: f32,
 }
 
 /// The earliest arrival at least this strong relative to the strongest (-10 dB) is taken as the
@@ -143,13 +170,34 @@ pub fn find_signal(recording: &[f32], reference: &[f32]) -> Option<Detection> {
             offset += (0.5 * (ym - yp) / denom).clamp(-0.5, 0.5);
         }
     }
-    Some(Detection { offset_frames: offset, snr_db })
+    let (level_db, peak_dbfs) = arrival_level(recording, k, reference.len());
+    Some(Detection { offset_frames: offset, snr_db, level_db, peak_dbfs })
+}
+
+/// Level and peak of an arrival of `len` samples at `start` (see [`Detection::level_db`]). A log
+/// sweep has the same energy in every octave, so this level weighs its band the way music sounds.
+fn arrival_level(recording: &[f32], start: usize, len: usize) -> (f32, f32) {
+    let power = |s: &[f32]| s.iter().map(|&x| (x as f64).powi(2)).sum::<f64>();
+    let end = (start + len + len / 5).min(recording.len());
+    let span = &recording[start.min(end)..end];
+    let before = &recording[..start.saturating_sub(len / 20)];
+    let noise = if before.is_empty() { 0.0 } else { power(before) / before.len() as f64 };
+    let energy = (power(span) - noise * span.len() as f64).max(0.0);
+    let level_db = 10.0 * (energy / len.max(1) as f64).max(1e-12).log10();
+    let peak = span.iter().fold(0f32, |m, x| m.max(x.abs()));
+    (level_db as f32, 20.0 * peak.max(1e-6).log10())
 }
 
 /// Below this a detection counts as weak (the run still uses it; detection needs [`MIN_SNR_DB`]).
 pub const WEAK_SNR_DB: f32 = 30.0;
 /// A device's sweeps further apart than this make its correction doubtful.
 pub const MAX_SPREAD_NS: Nanos = 1_000_000;
+/// One speaker's sweeps varying in level by more than this point to a microphone that adjusts
+/// its own gain (webcams and cameras do), which squeezes level differences.
+pub const MAX_LEVEL_SPREAD_DB: f32 = 2.0;
+/// Sweeps peaking above this may have hit the microphone's limit (some limit well below full
+/// scale), which makes a loud speaker measure quieter than it is.
+pub const OVERLOAD_DBFS: f32 = -6.0;
 
 /// One device's outcome of a calibration (or check) run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -163,6 +211,12 @@ pub struct CalibResult {
     pub spread_ns: Nanos,
     pub heard: u8,
     pub sweeps: u8,
+    /// How much louder than the quietest speaker this one arrived (dB, 0 for the quietest).
+    pub level_db: f32,
+    /// Loudest sample of this speaker's sweeps at the microphone, dBFS.
+    pub peak_dbfs: f32,
+    /// Largest level difference between this speaker's sweeps (0 with one sweep).
+    pub level_spread_db: f32,
 }
 
 impl CalibResult {
@@ -178,39 +232,68 @@ impl CalibResult {
         if self.snr_db < WEAK_SNR_DB {
             p.push(format!("weak signal ({:.0} dB)", self.snr_db));
         }
+        if self.level_spread_db > MAX_LEVEL_SPREAD_DB {
+            p.push(format!("level varied by {:.1} dB between sweeps (the microphone may adjust its own gain)", self.level_spread_db));
+        }
+        if self.peak_dbfs > OVERLOAD_DBFS {
+            p.push(format!("microphone overloaded (peaks at {:.0} dBFS)", self.peak_dbfs));
+        }
         p
     }
 }
 
-/// One device's sweeps: (arrival − scheduled, SNR in dB), or `None` for a sweep not heard.
-pub type Sweeps = Vec<Option<(Nanos, f32)>>;
+/// One sweep as the microphone heard it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Heard {
+    /// Arrival − scheduled emission.
+    pub residual_ns: Nanos,
+    pub snr_db: f32,
+    pub level_db: f32,
+    pub peak_dbfs: f32,
+}
 
-/// Turns each device's sweeps — arrival residual (arrival − scheduled) and SNR, or `None` when
-/// a sweep was not heard — into corrections: each device's median residual against the
-/// reference. `Err(node)` names a device none of whose sweeps was heard.
+/// One device's sweeps, `None` for a sweep not heard.
+pub type Sweeps = Vec<Option<Heard>>;
+
+/// Turns each device's sweeps into corrections: each device's median residual against the
+/// reference, and its median level against the quietest device. `Err(node)` names a device none
+/// of whose sweeps was heard.
 pub fn calibration_results(measured: &[(NodeId, Sweeps)], reference: CalibReference) -> Result<Vec<CalibResult>, NodeId> {
+    fn median<T: Copy + PartialOrd + std::ops::Add<Output = T>>(mut v: Vec<T>, half: impl Fn(T) -> T) -> T {
+        v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let m = v.len() / 2;
+        if v.len() % 2 == 1 { v[m] } else { half(v[m - 1] + v[m]) }
+    }
     let mut medians = Vec::with_capacity(measured.len());
     let mut results = Vec::with_capacity(measured.len());
     for (node, sweeps) in measured {
-        let mut heard: Vec<Nanos> = sweeps.iter().flatten().map(|&(r, _)| r).collect();
+        let heard: Vec<Heard> = sweeps.iter().flatten().copied().collect();
         if heard.is_empty() {
             return Err(*node);
         }
-        heard.sort_unstable();
-        let m = heard.len() / 2;
-        let median = if heard.len() % 2 == 1 { heard[m] } else { (heard[m - 1] + heard[m]) / 2 };
-        medians.push((*node, median));
+        let residuals: Vec<Nanos> = heard.iter().map(|h| h.residual_ns).collect();
+        let levels = heard.iter().map(|h| h.level_db);
+        let level_spread_db = levels.clone().fold(f32::NEG_INFINITY, f32::max) - levels.fold(f32::INFINITY, f32::min);
+        let (first, last) = (residuals.iter().min().copied().unwrap_or(0), residuals.iter().max().copied().unwrap_or(0));
+        medians.push((*node, median(residuals, |x| x / 2)));
         results.push(CalibResult {
             node: *node,
             delta_ns: 0,
-            snr_db: sweeps.iter().flatten().map(|&(_, s)| s).fold(f32::INFINITY, f32::min),
-            spread_ns: heard[heard.len() - 1] - heard[0],
+            snr_db: heard.iter().map(|h| h.snr_db).fold(f32::INFINITY, f32::min),
+            spread_ns: last - first,
             heard: heard.len() as u8,
             sweeps: sweeps.len() as u8,
+            level_db: median(heard.iter().map(|h| h.level_db).collect(), |x| x / 2.0),
+            peak_dbfs: heard.iter().map(|h| h.peak_dbfs).fold(f32::NEG_INFINITY, f32::max),
+            level_spread_db,
         });
     }
     for (r, (_, delta)) in results.iter_mut().zip(solve_offsets(&medians, reference)) {
         r.delta_ns = delta;
+    }
+    let quietest = results.iter().map(|r| r.level_db).fold(f32::INFINITY, f32::min);
+    for r in &mut results {
+        r.level_db -= quietest;
     }
     Ok(results)
 }
@@ -319,13 +402,17 @@ mod tests {
         assert!((d.offset_frames - direct).abs() < 2.0, "found {:.1}, direct sound at {direct}", d.offset_frames);
     }
 
+    fn heard(residual_ns: Nanos, snr_db: f32) -> Option<Heard> {
+        Some(Heard { residual_ns, snr_db, level_db: -30.0, peak_dbfs: -20.0 })
+    }
+
     #[test]
     fn results_take_the_median_of_each_devices_sweeps_and_flag_doubtful_ones() {
         const MS: Nanos = 1_000_000;
         let measured = [
-            (1, vec![Some((10 * MS, 42.0)), Some((10 * MS + 200_000, 40.0)), Some((13 * MS, 36.0))]), // one sweep off
-            (2, vec![Some((5 * MS, 44.0)), None, Some((5 * MS + 100_000, 45.0))]),                  // one not heard
-            (3, vec![Some((20 * MS, 25.0)), Some((20 * MS, 26.0)), Some((20 * MS + 50_000, 25.5))]), // weak
+            (1, vec![heard(10 * MS, 42.0), heard(10 * MS + 200_000, 40.0), heard(13 * MS, 36.0)]), // one sweep off
+            (2, vec![heard(5 * MS, 44.0), None, heard(5 * MS + 100_000, 45.0)]),                  // one not heard
+            (3, vec![heard(20 * MS, 25.0), heard(20 * MS, 26.0), heard(20 * MS + 50_000, 25.5)]), // weak
         ];
         let results = calibration_results(&measured, CalibReference::Node(2)).unwrap();
         let by = |n: NodeId| results.iter().find(|r| r.node == n).unwrap();
@@ -338,8 +425,59 @@ mod tests {
         assert_eq!(by(1).problems(), vec!["sweeps disagree by 3.0 ms".to_string()]);
         assert_eq!(by(2).problems(), vec!["heard 2 of 3 sweeps".to_string()]);
         assert_eq!(by(3).problems(), vec!["weak signal (25 dB)".to_string()]);
-        let missing = [(1, vec![Some((MS, 40.0))]), (7, vec![None, None, None])];
+        let missing = [(1, vec![heard(MS, 40.0)]), (7, vec![None, None, None])];
         assert_eq!(calibration_results(&missing, CalibReference::Median), Err(7), "a device never heard fails the run");
+    }
+
+    #[test]
+    fn levels_are_relative_to_the_quietest_speaker() {
+        let sweep = |level_db: f32, peak_dbfs: f32| Some(Heard { residual_ns: 0, snr_db: 40.0, level_db, peak_dbfs });
+        let measured = [
+            (1, vec![sweep(-30.0, -20.0), sweep(-31.0, -21.0), sweep(-29.5, -19.0)]), // median -30
+            (2, vec![sweep(-24.0, -12.0), None, sweep(-25.0, -12.5)]),                // median of two: -24.5
+            (3, vec![sweep(-22.0, -3.3), sweep(-22.2, -3.4), sweep(-21.9, -3.3)]),    // median -22, overloaded
+        ];
+        let results = calibration_results(&measured, CalibReference::Median).unwrap();
+        let by = |n: NodeId| results.iter().find(|r| r.node == n).unwrap();
+        assert_eq!(by(1).level_db, 0.0, "the quietest speaker is the reference");
+        assert_eq!(by(2).level_db, 5.5);
+        assert_eq!(by(3).level_db, 8.0);
+        assert_eq!(by(3).peak_dbfs, -3.3, "the loudest sample of the speaker's sweeps");
+        assert!(by(2).problems().iter().all(|p| !p.contains("overloaded")));
+        assert_eq!(by(3).problems(), vec!["microphone overloaded (peaks at -3 dBFS)".to_string()]);
+    }
+
+    #[test]
+    fn a_microphone_that_adjusts_its_own_gain_is_flagged() {
+        // A camera microphone measured on real hardware: the same speaker's sweeps came in at
+        // -31.0, -28.8 and -27.2 dBFS as its automatic gain crept up. Such a microphone squeezes
+        // level differences, so matching needs another Check.
+        let sweep = |level_db: f32| Some(Heard { residual_ns: 0, snr_db: 40.0, level_db, peak_dbfs: -15.0 });
+        let measured = [(1, vec![sweep(-31.0), sweep(-28.8), sweep(-27.2)]), (2, vec![sweep(-20.0), sweep(-20.3), sweep(-19.9)])];
+        let results = calibration_results(&measured, CalibReference::Median).unwrap();
+        assert_eq!(results[0].problems(), vec!["level varied by 3.8 dB between sweeps (the microphone may adjust its own gain)".to_string()]);
+        assert!(results[1].problems().is_empty(), "{:?}", results[1]);
+    }
+
+    #[test]
+    fn level_is_measured_without_the_room_noise() {
+        // The same sweep at two gains 6 dB apart, in noise that is not far below it: the level
+        // must follow the gain, not the noise.
+        let reference = calibration_sweep(RATE);
+        let delay = 9_876.0;
+        let level = |gain: f64| {
+            let mut rec = noise(21, 36_000, 0.02); // −38.8 dBFS, just 4 dB under the quieter sweep
+            for (i, x) in rec.iter_mut().enumerate() {
+                *x += (gain * sweep_value((i as f64 - delay) / RATE as f64, 0.1, 200.0, 8000.0)) as f32;
+            }
+            find_signal(&rec, &reference).expect("detected")
+        };
+        let (loud, quiet) = (level(0.1), level(0.05));
+        assert!(((loud.level_db - quiet.level_db) - 6.02).abs() < 0.3, "{} vs {}", loud.level_db, quiet.level_db);
+        // A 0.5-amplitude sweep has a mean square of about 0.125 (-9 dB): at gain 0.1, -29 dBFS.
+        assert!((loud.level_db - (-29.0)).abs() < 0.5, "level {}", loud.level_db);
+        // Peak: the sweep's 0.05 plus at most 0.02 of noise.
+        assert!((-26.1..=-23.0).contains(&loud.peak_dbfs), "peak {}", loud.peak_dbfs);
     }
 
     #[test]
@@ -394,6 +532,18 @@ mod tests {
         // Unknown reference node falls back to the median.
         let fallback = solve_offsets(&[(1, 10 * ms), (2, 45 * ms), (3, 190 * ms)], CalibReference::Node(9));
         assert_eq!(fallback[1], (2, 0));
+    }
+
+    #[test]
+    fn wake_noise_is_a_soft_second_of_sound() {
+        let w = wake_noise(RATE);
+        assert_eq!(w.len(), RATE as usize, "one second");
+        let peak = w.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak > 0.01 && peak <= WAKE_LEVEL, "peak {peak}");
+        assert!(w[0].abs() < 1e-4 && w[w.len() - 1].abs() < 1e-3, "faded in and out");
+        let middle = &w[RATE as usize / 10..RATE as usize * 9 / 10];
+        let rms = (middle.iter().map(|x| x * x).sum::<f32>() / middle.len() as f32).sqrt();
+        assert!(rms > WAKE_LEVEL / 4.0, "sound throughout, rms {rms}");
     }
 
     #[test]

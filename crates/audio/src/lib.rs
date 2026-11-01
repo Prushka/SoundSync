@@ -149,6 +149,8 @@ pub trait AudioHost: Send + Sync {
     fn endpoint_volume(&self, sel: &DeviceSelector) -> Result<EndpointVolume, AudioError>;
     /// Moves the device's own volume slider (0..=1).
     fn set_endpoint_volume(&self, sel: &DeviceSelector, scalar: f32) -> Result<(), AudioError>;
+    /// Sets the device's own volume to a dB level (clamped to what the device can do).
+    fn set_endpoint_volume_db(&self, sel: &DeviceSelector, db: f32) -> Result<(), AudioError>;
     /// Mutes or unmutes the device itself.
     fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError>;
     /// Number of other processes' active render sessions on the endpoint.

@@ -154,3 +154,17 @@ fn tick_gap_resets_clocks() {
     r1.shutdown();
     m.shutdown();
 }
+
+#[test]
+fn device_changes_are_counted_for_the_device_lists() {
+    // The UI refreshes its device pickers when this count moves.
+    let n = spawn("n", FakeClock::default(), |h| {
+        h.add_output(output("TV", 0.0, 10, 0));
+        h.add_output(output("Laptop", 0.0, 10, 0));
+    });
+    sleep(Duration::from_millis(300));
+    let before = n.engine.status().device_events;
+    n.host.set_default_render("Laptop");
+    assert!(wait_until(Duration::from_secs(2), || n.engine.status().device_events > before));
+    n.shutdown();
+}

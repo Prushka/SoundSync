@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use soundsync_core::clock::{ClockEstimator, ClockMap};
-use soundsync_core::protocol::{Hello, NodeState};
+use soundsync_core::protocol::{Hello, InputList, NodeState};
 use soundsync_core::{Nanos, NodeId, Os};
 
 pub const PEER_TIMEOUT_NS: Nanos = 5_000_000_000;
@@ -23,6 +23,8 @@ pub struct Peer {
     pub last_rx: Nanos,
     pub clock: ClockEstimator,
     pub state: Option<NodeState>,
+    /// Its microphones, from its last `Inputs` answer.
+    pub inputs: Option<InputList>,
     pub next_ping: Nanos,
 }
 
@@ -72,6 +74,7 @@ impl PeerTable {
                         last_rx: now,
                         clock: ClockEstimator::new(),
                         state: None,
+                        inputs: None,
                         next_ping: now,
                     },
                 );

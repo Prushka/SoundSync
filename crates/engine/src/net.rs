@@ -14,7 +14,7 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use socket2::{Domain, Protocol, Socket, Type};
 use soundsync_audio::AudioHost;
-use soundsync_core::protocol::{Control, GroupKey, MAX_DATAGRAM, Packet, decode, encode};
+use soundsync_core::protocol::{Control, DecodeError, GroupKey, MAX_DATAGRAM, Packet, decode, encode};
 use soundsync_core::{Nanos, NodeId};
 
 use crate::chunk::AudioChunk;
@@ -102,6 +102,26 @@ pub struct RxCounters {
     pub unrouted_audio: AtomicU64,
     /// Last time (host clock) any authenticated packet arrived.
     pub last_authenticated_ns: std::sync::atomic::AtomicI64,
+    /// The last datagram from a SoundSync speaking another protocol version.
+    pub other_version: std::sync::Mutex<Option<OtherVersion>>,
+}
+
+impl RxCounters {
+    /// When a SoundSync datagram last got in: an authenticated one, or one from another version
+    /// (unreadable, but it got past the firewall all the same).
+    pub fn last_heard_ns(&self) -> Option<Nanos> {
+        let authenticated = Some(self.last_authenticated_ns.load(Ordering::Relaxed)).filter(|t| *t != 0);
+        let other = self.other_version.lock().unwrap().map(|o| o.at_ns);
+        authenticated.max(other)
+    }
+}
+
+/// A SoundSync datagram this version cannot read (unauthenticated: only a hint for the user).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OtherVersion {
+    pub from: std::net::IpAddr,
+    pub version: u8,
+    pub at_ns: Nanos,
 }
 
 struct Delayed {
@@ -150,8 +170,11 @@ impl Rx {
     fn deliver(&mut self, buf: &[u8], from: SocketAddr, arrival_ns: Nanos) {
         let (sender, packet) = match decode(buf, &self.transport.key) {
             Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
                 self.counters.bad_packets.fetch_add(1, Ordering::Relaxed);
+                if let DecodeError::BadVersion(version) = e {
+                    *self.counters.other_version.lock().unwrap() = Some(OtherVersion { from: from.ip(), version, at_ns: arrival_ns });
+                }
                 return;
             }
         };
@@ -255,4 +278,21 @@ pub fn spawn_rx(
             }
         })
         .expect("spawn network thread")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_datagram_from_another_version_proves_packets_get_in() {
+        // Inbound reachability counts any SoundSync datagram: one we cannot read still got past
+        // the firewall (blaming the firewall for a version mismatch would send people astray).
+        let c = RxCounters::default();
+        assert_eq!(c.last_heard_ns(), None);
+        *c.other_version.lock().unwrap() = Some(OtherVersion { from: [192, 168, 1, 157].into(), version: 1, at_ns: 5_000 });
+        assert_eq!(c.last_heard_ns(), Some(5_000));
+        c.last_authenticated_ns.store(7_000, Ordering::Relaxed);
+        assert_eq!(c.last_heard_ns(), Some(7_000));
+    }
 }

@@ -11,7 +11,7 @@ use soundsync_core::clock::ClockMap;
 use soundsync_core::delay::{DelayPolicy, DelaySetting};
 use soundsync_core::layout::{ChannelMap, MapKind, describe};
 use soundsync_core::player::{PlayerConfig, StreamPlayer};
-use soundsync_core::protocol::{Control, NodeState, OutputInfo, RxStat, StreamInfo};
+use soundsync_core::protocol::{Control, NodeState, OutputInfo, RxStat, StreamInfo, VolumeChange};
 use soundsync_core::{MasterMode, Nanos, NodeId, Os, Role, StreamFormat};
 
 use crate::chunk::AudioChunk;
@@ -151,23 +151,6 @@ impl Node {
         let devices = self.host.devices(dir)?;
         let d = select_device(&devices, sel)?;
         Ok((d.id.clone(), d.name.clone(), d.mix_format))
-    }
-
-    /// Reads the output device's own volume and keeps SoundSync's software level out of the way
-    /// while the device has one (the Volume slider is the device's volume then).
-    fn poll_output_volume(&mut self) {
-        self.media.output_volume = self.media.output.as_ref().and_then(|o| self.host.endpoint_volume(&DeviceSelector::Id(o.id.clone())).ok());
-        let (volume, muted) = match self.media.output_volume {
-            Some(_) => (1.0, false),
-            None => (self.config.playback.volume, self.config.playback.muted),
-        };
-        self.media.mixer.volume_bits.store(volume.to_bits(), Ordering::Relaxed);
-        self.media.mixer.muted.store(muted, Ordering::Relaxed);
-    }
-
-    /// The output whose own volume the Volume slider controls, if it has one.
-    fn device_volume_selector(&self) -> Option<DeviceSelector> {
-        self.media.output_volume.and(self.media.output.as_ref()).map(|o| DeviceSelector::Id(o.id.clone()))
     }
 
     /// The multimedia default saved before we switched the OS default to the cable, if any.
@@ -528,6 +511,7 @@ impl Node {
             let format = (**c.shared.format.load())?;
             (id != 0).then_some(StreamInfo { stream_id: id, format, mode: c.mode, presentation_offset_ns: c.shared.presentation_offset_ns.load(Ordering::Relaxed) })
         });
+        let volume = self.own_volume();
         NodeState {
             name: self.config.node.name.clone(),
             os: Os::current(),
@@ -538,6 +522,9 @@ impl Node {
             extra_latency_ns: self.config.extra_latency_ns(),
             required_delay_ns: self.required_delay(),
             plays_remote: self.config.playback.play_remote && !self.media.echo_guard,
+            volume: volume.volume,
+            muted: volume.muted,
+            device_volume: volume.device,
             rx: self
                 .media
                 .slots
@@ -593,7 +580,7 @@ impl Node {
         }
     }
 
-    fn send_state(&self) {
+    pub(crate) fn send_state(&self) {
         let state = Control::State(self.node_state());
         for p in self.peers.iter() {
             self.send(p.addr, &state);
@@ -674,6 +661,11 @@ impl Node {
                     self.set_own_extra_latency(*extra_latency_ns);
                 }
             }
+            Control::SetVolume { target, change } => {
+                if *target == self.id() {
+                    self.change_own_volume(*change);
+                }
+            }
             _ => return false,
         }
         true
@@ -734,39 +726,9 @@ impl Node {
                 self.save_config();
                 self.open_output();
             }
-            Command::SetVolume(v) => {
-                let v = v.clamp(0.0, 1.0);
-                match self.device_volume_selector() {
-                    Some(sel) => match self.host.set_endpoint_volume(&sel, v) {
-                        Ok(()) => {
-                            if let Some(ov) = &mut self.media.output_volume {
-                                ov.scalar = v;
-                            }
-                        }
-                        Err(e) => tracing::warn!("cannot set the output's volume: {e}"),
-                    },
-                    None => {
-                        self.config.playback.volume = v;
-                        self.media.mixer.volume_bits.store(v.to_bits(), Ordering::Relaxed);
-                        self.save_config();
-                    }
-                }
-            }
-            Command::SetMuted(m) => match self.device_volume_selector() {
-                Some(sel) => match self.host.set_endpoint_mute(&sel, *m) {
-                    Ok(()) => {
-                        if let Some(ov) = &mut self.media.output_volume {
-                            ov.muted = *m;
-                        }
-                    }
-                    Err(e) => tracing::warn!("cannot mute the output: {e}"),
-                },
-                None => {
-                    self.config.playback.muted = *m;
-                    self.media.mixer.muted.store(*m, Ordering::Relaxed);
-                    self.save_config();
-                }
-            },
+            Command::SetVolume(v) => self.change_own_volume(VolumeChange::Set(*v)),
+            Command::SetMuted(m) => self.change_own_volume(VolumeChange::Muted(*m)),
+            Command::ChangeVolume { node, change } => self.change_volume(*node, *change),
             Command::SetFollowMasterVolume(f) => {
                 self.config.playback.follow_master_volume = *f;
                 self.media.mixer.follow_master_volume.store(*f, Ordering::Relaxed);
@@ -836,10 +798,9 @@ impl Node {
         st.capture = self.media.capture.as_ref().map(|c| DeviceStatus { name: c.device.clone(), format: c.stream.format(), latency_ns: c.probe_ns });
         st.output = self.media.output.as_ref().map(|o| DeviceStatus { name: o.device.clone(), format: o.format, latency_ns: o.stream.latency_ns() });
         st.delay_ns = self.presentation_offset();
-        if let Some(v) = self.media.output_volume {
-            (st.volume, st.muted) = (v.scalar, v.muted);
-        }
-        st.volume_device = self.media.output_volume.and(self.media.output.as_ref()).map(|o| o.device.clone());
+        let v = self.own_volume();
+        (st.volume, st.muted) = (v.volume, v.muted);
+        st.volume_device = self.media.output.as_ref().filter(|_| v.device).map(|o| o.device.clone());
         let out_format = self.media.output.as_ref().map(|o| o.format);
         st.streams = self
             .media

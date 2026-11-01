@@ -36,8 +36,13 @@ pub struct Drafts {
     pub delay_ms: f64,
     pub mic_node: Option<NodeId>,
     pub mic_device: String,
+    /// Apply also turns louder speakers down to the quietest one.
+    pub match_volumes: bool,
     /// Per-node extra latency being edited (ms).
     pub extra_ms: HashMap<NodeId, f64>,
+    /// Per-node Volume slider being moved (percent, when last touched): shown instead of the
+    /// reported value until that catches up.
+    pub volume: HashMap<NodeId, (f32, Instant)>,
 }
 
 impl Drafts {
@@ -56,7 +61,9 @@ impl Drafts {
             delay_ms,
             mic_node: None,
             mic_device: String::new(),
+            match_volumes: true,
             extra_ms: HashMap::new(),
+            volume: HashMap::new(),
         }
     }
 }
@@ -96,6 +103,10 @@ pub struct SoundSyncApp {
     last_status: Instant,
     last_config: Instant,
     last_devices: Instant,
+    /// The engine's device-change count when the device lists were last refreshed.
+    seen_device_events: u64,
+    /// The remote microphone node last asked for its list, and when.
+    inputs_asked: Option<(NodeId, Instant)>,
     _instance: InstanceGuard,
 }
 
@@ -194,6 +205,8 @@ impl SoundSyncApp {
             last_status: Instant::now(),
             last_config: Instant::now(),
             last_devices: Instant::now() - Duration::from_secs(60),
+            seen_device_events: 0,
+            inputs_asked: None,
             _instance: app.instance,
         };
         s.refresh_devices();
@@ -239,6 +252,16 @@ impl SoundSyncApp {
                 self.quitting.store(true, Ordering::Release);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+        }
+    }
+
+    /// Keeps the microphone list of the chosen remote microphone node fresh while it is shown.
+    fn ask_for_remote_inputs(&mut self) {
+        let Some(node) = self.drafts.mic_node.filter(|n| *n != self.status.node_id) else { return };
+        let due = self.inputs_asked.is_none_or(|(asked, at)| asked != node || at.elapsed() >= Duration::from_secs(5));
+        if self.visible && self.tab == Tab::Sync && due {
+            self.inputs_asked = Some((node, Instant::now()));
+            self.command(Command::ListInputs(node));
         }
     }
 
@@ -340,6 +363,11 @@ impl eframe::App for SoundSyncApp {
             if let Some(t) = &mut self.tray {
                 t.update(&self.status);
             }
+            if self.status.device_events != self.seen_device_events {
+                self.seen_device_events = self.status.device_events;
+                self.refresh_devices(); // a device came, went or changed: show it at once
+            }
+            self.ask_for_remote_inputs();
         }
         if self.last_config.elapsed() >= Duration::from_secs(1) {
             self.last_config = Instant::now();

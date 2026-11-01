@@ -25,12 +25,20 @@ pub fn fmt_snr(db: f32) -> String {
     if db > 60.0 { "> 60 dB".into() } else { format!("{db:.0} dB") }
 }
 
+/// A speaker's level in calibration results: how much louder than the quietest one it arrived.
+pub fn fmt_level(db: f32) -> String {
+    if db < 0.05 { "quietest".into() } else { format!("+{db:.1} dB") }
+}
+
 /// Note for one device's calibration result and whether it looks good. A check run (`check`)
-/// shows what is left, which is fine within the 1 ms people notice.
+/// shows what is left, which is fine within the 1 ms and 1 dB people notice.
 pub fn calib_note(r: &soundsync_core::calib::CalibResult, check: bool) -> (String, bool) {
     let mut notes = Vec::new();
     if check && r.delta_ns.abs() > 1_000_000 {
-        notes.push(format!("off by {:.1} ms (Apply corrects it)", r.delta_ns.abs() as f64 / 1e6));
+        notes.push(format!("off by {:.1} ms (Correct these fixes it)", r.delta_ns.abs() as f64 / 1e6));
+    }
+    if check && r.level_db > 1.0 {
+        notes.push(format!("{:.1} dB louder (Correct these turns it down)", r.level_db));
     }
     notes.extend(r.problems());
     if notes.is_empty() {
@@ -72,7 +80,23 @@ mod tests {
             spread_ns: (spread_ms * 1e6) as Nanos,
             heard,
             sweeps,
+            level_db: 0.0,
+            peak_dbfs: -20.0,
+            level_spread_db: 0.0,
         }
+    }
+
+    #[test]
+    fn levels_and_what_a_check_leaves() {
+        assert_eq!(fmt_level(0.0), "quietest");
+        assert_eq!(fmt_level(4.06), "+4.1 dB");
+        // A check: within 1 dB counts as matched, like 1 ms for timing.
+        let louder = soundsync_core::calib::CalibResult { level_db: 2.4, ..result(0.2, 40.0, 0.0, 1, 1) };
+        assert_eq!(calib_note(&louder, true), ("2.4 dB louder (Correct these turns it down)".to_string(), false));
+        let close = soundsync_core::calib::CalibResult { level_db: 0.8, ..result(0.2, 40.0, 0.0, 1, 1) };
+        assert_eq!(calib_note(&close, true), ("✓ in sync".to_string(), true));
+        // In a calibration the Level column says it; Apply turns it down.
+        assert_eq!(calib_note(&louder, false), ("✓".to_string(), true));
     }
 
     #[test]
@@ -84,8 +108,8 @@ mod tests {
         assert_eq!(calib_note(&result(12.0, 24.0, 2.0, 2, 3), false), ("heard 2 of 3 sweeps; sweeps disagree by 2.0 ms; weak signal (24 dB)".to_string(), false));
         // Check run: what is left.
         assert_eq!(calib_note(&result(0.4, 40.0, 0.0, 1, 1), true), ("✓ in sync".to_string(), true));
-        assert_eq!(calib_note(&result(-2.5, 40.0, 0.0, 1, 1), true), ("off by 2.5 ms (Apply corrects it)".to_string(), false));
-        assert_eq!(calib_note(&result(-2.5, 22.0, 0.0, 1, 1), true), ("off by 2.5 ms (Apply corrects it); weak signal (22 dB)".to_string(), false));
+        assert_eq!(calib_note(&result(-2.5, 40.0, 0.0, 1, 1), true), ("off by 2.5 ms (Correct these fixes it)".to_string(), false));
+        assert_eq!(calib_note(&result(-2.5, 22.0, 0.0, 1, 1), true), ("off by 2.5 ms (Correct these fixes it); weak signal (22 dB)".to_string(), false));
     }
     use soundsync_core::player::PlayState;
     use soundsync_core::protocol::RxStat;
@@ -118,6 +142,8 @@ mod tests {
             clock_offset_ns: None,
             extra_latency_ns: 0,
             output: None,
+            volume: None,
+            inputs: None,
             rx: rx_from.map(|m| vec![RxStat { master: m, stream_id: 1, sync_error_ns: 0, behind_ns: 0, lost_frames: 0 }]).unwrap_or_default(),
         }
     }

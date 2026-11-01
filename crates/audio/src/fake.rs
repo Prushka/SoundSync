@@ -132,6 +132,8 @@ struct Inner {
     default_render: Option<String>,
     /// Devices' own volume (slider 0..=1, mute); unset means 100% and unmuted.
     volumes: HashMap<String, (f32, bool)>,
+    /// Outputs that mute after silence: (silence before muting, time to unmute), ns.
+    sleepy: HashMap<String, (Nanos, Nanos)>,
     watchers: Vec<(u64, Watcher)>,
     next_watcher: u64,
 }
@@ -168,6 +170,42 @@ fn device_gain(inner: &Mutex<Inner>, name: &str) -> f32 {
     match inner.lock().unwrap().volumes.get(name) {
         Some(&(scalar, muted)) => EndpointVolume { scalar, db: fake_db(scalar), muted }.gain(),
         None => 1.0,
+    }
+}
+
+/// A sink that mutes after a stretch of digital silence and takes a while to unmute once sound
+/// comes back, losing that sound (TVs and soundbars do this): see [`FakeHost::make_sleepy`].
+struct SleepySink {
+    sleep_after: f64,
+    wake: f64,
+    silent_for: f64,
+    asleep: bool,
+    /// Time left until a waking sink plays again.
+    waking: Option<f64>,
+}
+
+impl SleepySink {
+    fn new((sleep_after, wake): (Nanos, Nanos)) -> Self {
+        SleepySink { sleep_after: sleep_after as f64, wake: wake as f64, silent_for: 0.0, asleep: false, waking: None }
+    }
+
+    /// Plays or mutes one frame lasting `dt` ns.
+    fn frame(&mut self, frame: &mut [f32], dt: f64) {
+        let sound = frame.iter().any(|x| *x != 0.0);
+        if self.asleep {
+            match &mut self.waking {
+                None if sound => self.waking = Some(self.wake - dt),
+                None => {}
+                Some(left) => *left -= dt,
+            }
+            if self.waking.is_none_or(|left| left > 0.0) {
+                frame.fill(0.0);
+                return;
+            }
+            (self.asleep, self.waking, self.silent_for) = (false, None, 0.0);
+        }
+        self.silent_for = if sound { 0.0 } else { self.silent_for + dt };
+        self.asleep = self.silent_for >= self.sleep_after;
     }
 }
 
@@ -254,6 +292,12 @@ impl FakeHost {
         self.inner.lock().unwrap().mics.push((name.to_string(), hidden_input_latency_ns));
     }
 
+    /// Makes `device` mute after `after_silence_ns` of digital silence and lose the first
+    /// `wake_ns` of sound that follows (like a TV or soundbar).
+    pub fn make_sleepy(&self, device: &str, after_silence_ns: Nanos, wake_ns: Nanos) {
+        self.inner.lock().unwrap().sleepy.insert(device.to_string(), (after_silence_ns, wake_ns));
+    }
+
     pub fn set_active_sessions(&self, device: &str, n: usize) {
         self.inner.lock().unwrap().sessions.insert(device.to_string(), n);
     }
@@ -330,6 +374,7 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
     let mut det = OnsetDetector { prev: 0.0 };
     let mut found = Vec::new();
     let room = inner.lock().unwrap().room.clone();
+    let mut sleepy = inner.lock().unwrap().sleepy.get(&spec.name).copied().map(SleepySink::new);
     let mut emitted: Vec<(Nanos, f32)> = Vec::new();
     while !stop.load(Ordering::Acquire) && !device_removed(&inner, &spec.name) {
         let now = true_now();
@@ -349,6 +394,9 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
             let gain = device_gain(&inner, &spec.name); // the device's own volume, as Windows applies it
             if gain != 1.0 {
                 out.iter_mut().for_each(|x| *x *= gain);
+            }
+            if let Some(sink) = &mut sleepy {
+                out.chunks_exact_mut(ch).for_each(|f| sink.frame(f, 1e9 / dev_rate));
             }
             let shift = (spec.reported_latency_ns + spec.hidden_latency_ns) as f64;
             for j in 0..n {
@@ -516,6 +564,10 @@ impl AudioHost for FakeHost {
         Ok(())
     }
 
+    fn set_endpoint_volume_db(&self, sel: &DeviceSelector, db: f32) -> Result<(), AudioError> {
+        self.set_endpoint_volume(sel, 10f32.powf(db / 35.0)) // inverse of fake_db
+    }
+
     fn set_endpoint_mute(&self, sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {
         let name = self.resolve(sel)?;
         self.inner.lock().unwrap().volumes.entry(name).or_insert((1.0, false)).1 = muted;
@@ -559,6 +611,37 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+
+    #[test]
+    fn sleepy_sink_mutes_after_silence_and_loses_the_start_of_sound() {
+        let ms = 1e6;
+        let mut sink = SleepySink::new((1_000_000_000, 300_000_000));
+        let mut play = |x: f32, dur_ms: f64| (0..(dur_ms as usize)).map(|_| {
+            let mut f = [x];
+            sink.frame(&mut f, ms);
+            f[0]
+        }).collect::<Vec<f32>>();
+        assert!(play(0.5, 100.0).iter().all(|x| *x == 0.5), "awake at first");
+        play(0.0, 1_000.0);
+        let after_sleep = play(0.5, 500.0);
+        assert!(after_sleep[..299].iter().all(|x| *x == 0.0), "the first 300 ms are lost");
+        assert!(after_sleep[300..].iter().all(|x| *x == 0.5), "then it plays");
+        play(0.0, 500.0);
+        assert!(play(0.5, 10.0).iter().all(|x| *x == 0.5), "a short pause does not put it to sleep");
+    }
+
+    #[test]
+    fn device_volume_can_be_set_in_decibels() {
+        let host = FakeHost::new(FakeClock::default());
+        host.add_output(FakeOutputSpec { name: "TV".into(), format: stereo(), ppm: 0.0, reported_latency_ns: 0, hidden_latency_ns: 0, period_ns: 10_000_000 });
+        let tv = DeviceSelector::Name("TV".into());
+        host.set_endpoint_volume_db(&tv, -10.5).unwrap();
+        let v = host.endpoint_volume(&tv).unwrap();
+        assert!((v.db - -10.5).abs() < 0.01, "{v:?}");
+        assert!((v.scalar - 0.5).abs() < 0.01, "the fake curve puts -10.5 dB at about 50%: {v:?}");
+        host.set_endpoint_volume_db(&tv, 6.0).unwrap();
+        assert_eq!(host.endpoint_volume(&tv).unwrap().scalar, 1.0, "clamped to the device's range");
     }
 
     #[test]

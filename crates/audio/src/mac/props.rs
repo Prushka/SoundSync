@@ -8,7 +8,8 @@ use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_audio_devic
 use objc2_core_audio::{
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectHasProperty, AudioObjectID, AudioObjectIsPropertySettable,
     AudioObjectPropertyAddress, AudioObjectSetPropertyData, kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyMute,
-    kAudioDevicePropertyVolumeDecibels, kAudioDevicePropertyVolumeScalar,
+    kAudioDevicePropertyVolumeDecibels, kAudioDevicePropertyVolumeDecibelsToScalar, kAudioDevicePropertyVolumeScalar,
+    kAudioHardwarePropertyRunLoop, kAudioObjectSystemObject,
     kAudioDevicePropertyBufferFrameSizeRange, kAudioDevicePropertyLatency, kAudioDevicePropertyNominalSampleRate,
     kAudioDevicePropertyPreferredChannelLayout, kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreams,
     kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput,
@@ -83,8 +84,54 @@ pub(crate) fn set_volume(id: AudioObjectID, scalar: f32) -> bool {
     !elements.is_empty() && elements.iter().all(|&e| set_output(id, kAudioDevicePropertyVolumeScalar, e, scalar))
 }
 
+/// Sets the output volume to `db` on every volume element (the device clamps it to its range);
+/// devices without a settable dB control get the scalar their own curve gives for `db`.
+pub(crate) fn set_volume_db(id: AudioObjectID, db: f32) -> bool {
+    let elements = volume_elements(id, kAudioDevicePropertyVolumeScalar);
+    if elements.is_empty() {
+        return false;
+    }
+    if elements.iter().all(|&e| set_output(id, kAudioDevicePropertyVolumeDecibels, e, db)) {
+        return true;
+    }
+    elements.iter().all(|&e| {
+        let scalar = db_to_scalar(id, e, db).unwrap_or_else(|| 10f32.powf(db / 20.0));
+        set_output(id, kAudioDevicePropertyVolumeScalar, e, scalar.clamp(0.0, 1.0))
+    })
+}
+
+/// The device's own dB-to-slider translation (the value is converted in place).
+fn db_to_scalar(id: AudioObjectID, element: u32, db: f32) -> Option<f32> {
+    let addr = element_address(kAudioDevicePropertyVolumeDecibelsToScalar, element);
+    let mut value = db;
+    let mut size = std::mem::size_of::<f32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(id, NonNull::from(&addr), 0, std::ptr::null(), NonNull::from(&mut size), NonNull::from(&mut value).cast::<c_void>())
+    };
+    (status == 0).then_some(value)
+}
+
 pub(crate) fn set_mute(id: AudioObjectID, muted: bool) -> bool {
     set_output(id, kAudioDevicePropertyMute, kAudioObjectPropertyElementMain, muted as u32)
+}
+
+/// Lets CoreAudio track device changes on a thread of its own. By default it uses the main
+/// thread's run loop, and its device list can go stale (a microphone plugged in does not appear)
+/// whenever that loop is not servicing it.
+pub(crate) fn hal_uses_own_thread() -> bool {
+    let addr = address(kAudioHardwarePropertyRunLoop, kAudioObjectPropertyScopeGlobal);
+    let run_loop: *const c_void = std::ptr::null();
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            kAudioObjectSystemObject as AudioObjectID,
+            NonNull::from(&addr),
+            0,
+            std::ptr::null(),
+            std::mem::size_of::<*const c_void>() as u32,
+            NonNull::from(&run_loop).cast::<c_void>(),
+        )
+    };
+    status == 0
 }
 
 /// Fixed-size property value.

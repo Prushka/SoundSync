@@ -26,6 +26,13 @@ pub(crate) fn set_endpoint_volume(sel: &DeviceSelector, scalar: f32) -> Result<(
     unsafe { vol.SetMasterVolumeLevelScalar(scalar.clamp(0.0, 1.0), std::ptr::null()) }.map_err(|e| os_err("set volume", e))
 }
 
+pub(crate) fn set_endpoint_volume_db(sel: &DeviceSelector, db: f32) -> Result<(), AudioError> {
+    let vol = endpoint(sel)?;
+    let (mut min, mut max, mut step) = (0f32, 0f32, 0f32);
+    unsafe { vol.GetVolumeRange(&mut min, &mut max, &mut step) }.map_err(|e| os_err("get volume range", e))?;
+    unsafe { vol.SetMasterVolumeLevel(db.clamp(min, max), std::ptr::null()) }.map_err(|e| os_err("set volume level", e))
+}
+
 pub(crate) fn set_endpoint_mute(sel: &DeviceSelector, muted: bool) -> Result<(), AudioError> {
     let vol = endpoint(sel)?;
     unsafe { vol.SetMute(muted, std::ptr::null()) }.map_err(|e| os_err("set mute", e))
