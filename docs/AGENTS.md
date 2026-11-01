@@ -276,6 +276,16 @@ Paths:
   3-vCPU CI runner, running tests in parallel made the group delay step up after warm-up or lost a click.
   Pinned to one core, parallel runs failed 5 of 5 and serial runs passed 3 of 3. That is why CI runs one
   test at a time. To reproduce a small runner here, use `run-pinned.ps1` (below).
+- **The macOS runner's timers oversleep even with tests run one at a time.** `timers_are_punctual()` is
+  false there, and measured requirements drift a 5 ms step at any moment. So tests skip their
+  exact group-delay comparisons there:
+  - `first_stream_…` and `restarted_stream_…` skip entirely.
+  - `virtual_mode_three_outputs_in_sync` skips only its "stable after warm-up" check, and checks sync
+    against every delay in effect.
+
+  To see what a delay decision was based on, temporarily log `peer_requirements` in
+  `update_presentation_offset`. `run-under-load.ps1` runs one test with its output shown while a second
+  copy of the suite loads the same core.
 - **GitHub macOS runners oversleep about 20 ms per timer.** The fake devices adapt their buffering
   (`WakeTracker`), and `SS_FAKE_MIN_SLEEP_MS=20` reproduces the runners locally.
 - **The LG TV/soundbar mutes the start of sound after minutes of digital silence:** it was lost after
@@ -344,6 +354,7 @@ own window or reads device state:
 | `resize-window.ps1 -ProcessId P` | Resize the window to see whole panels |
 | `read-volumes.ps1 [-Device name -Scalar s]` | Read every output's volume, or set one (restore afterwards!) |
 | `run-pinned.ps1 -Exe <test binary or cargo> -Cores n -Runs k -TestArgs "..."` | Run tests pinned to n cores, like a small CI runner; pinning cargo also pins the test binaries it starts |
+| `run-under-load.ps1 -Exe <test binary> -Test <name> -Cores 1 -Runs k` | Run one test with `--nocapture` while a second copy of the suite loads the same cores; prints failing runs' output |
 
 To test remote features without the Mac, run a second instance on the silent device:
 
