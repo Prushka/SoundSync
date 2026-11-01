@@ -142,7 +142,7 @@ impl Discovery {
         };
         let id_hex = format!("{node_id:016x}");
         let sid_hex = format!("{session:016x}");
-        let props = [("id", id_hex.as_str()), ("sid", sid_hex.as_str()), ("group", group), ("ver", env!("CARGO_PKG_VERSION")), ("os", os), ("role", role_txt(role))];
+        let props = [("id", id_hex.as_str()), ("sid", sid_hex.as_str()), ("group", group), ("ver", soundsync_core::version::version()), ("os", os), ("role", role_txt(role))];
         let info = ServiceInfo::new(SERVICE_TYPE, &instance, &host, &ips[..], port, &props[..])?;
         daemon.register(info.clone())?;
         let events = daemon.browse(SERVICE_TYPE)?;

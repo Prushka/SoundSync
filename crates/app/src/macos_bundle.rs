@@ -10,9 +10,10 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// Info.plist for SoundSync.app.
-pub fn info_plist(version: &str) -> String {
-    INFO_TEMPLATE.replace("{version}", &xml_escape(version))
+/// Info.plist for SoundSync.app: `version` is the release, `build` the CI build number (the
+/// bundle version; the release itself for local builds).
+pub fn info_plist(version: &str, build: Option<&str>) -> String {
+    INFO_TEMPLATE.replace("{version}", &xml_escape(version)).replace("{build}", &xml_escape(build.unwrap_or(version)))
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -76,8 +77,17 @@ mod tests {
     }
 
     #[test]
+    fn bundle_version_is_the_ci_build_number() {
+        let ci = info_plist("1.2.3", Some("42"));
+        assert!(ci.contains("<key>CFBundleShortVersionString</key>\n    <string>1.2.3</string>"));
+        assert!(ci.contains("<key>CFBundleVersion</key>\n    <string>42</string>"));
+        let local = info_plist("1.2.3", None);
+        assert!(local.contains("<key>CFBundleVersion</key>\n    <string>1.2.3</string>"));
+    }
+
+    #[test]
     fn info_plist_contains_required_keys() {
-        let p = info_plist("1.2.3");
+        let p = info_plist("1.2.3", None);
         for key in [
             "<key>CFBundleIdentifier</key>\n    <string>com.soundsync.app</string>",
             "<key>CFBundleName</key>\n    <string>SoundSync</string>",
@@ -92,7 +102,7 @@ mod tests {
         ] {
             assert!(p.contains(key), "missing {key}");
         }
-        assert!(!p.contains("{version}"));
+        assert!(!p.contains("{version}") && !p.contains("{build}"));
     }
 
     #[test]

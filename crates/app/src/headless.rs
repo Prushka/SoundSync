@@ -149,6 +149,7 @@ mod tests {
                 extra_latency_ns: 0,
                 output: None,
                 rx: vec![],
+                app_version: "0.1.0 (dev)".into(),
                 volume: None,
                 inputs: None,
             }],

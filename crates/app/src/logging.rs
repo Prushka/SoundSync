@@ -110,7 +110,7 @@ pub fn init_logging(dir: &Path) -> anyhow::Result<LogGuard> {
         .with_ansi(false)
         .with_writer(writer)
         .try_init();
-    tracing::info!("SoundSync {} starting", env!("CARGO_PKG_VERSION"));
+    tracing::info!("SoundSync {} starting", soundsync_core::version::version());
     if outcome.previous_crashed {
         tracing::warn!("the previous session did not exit cleanly; its log was kept as {:?}", outcome.archived);
     }

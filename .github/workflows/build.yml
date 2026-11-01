@@ -6,6 +6,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push to the same branch replaces a run still in progress, so releases never come out of
+# order (the replaced run's commits are listed in the newer release's notes).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Stamped into the binaries: the app shows "0.1.0 (build <n>, <commit>)".
+  SOUNDSYNC_BUILD: ${{ github.run_number }}
+
 jobs:
   build:
     strategy:
@@ -15,6 +25,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp the commit
+        shell: bash
+        run: echo "SOUNDSYNC_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -54,3 +67,23 @@ jobs:
           name: SoundSync-macos-universal
           path: dist/SoundSync-macos-universal.zip
           if-no-files-found: error
+
+  # Every push to main that builds and passes on both systems becomes a GitHub release.
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the notes list the commits since the previous release's tag
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-release.sh

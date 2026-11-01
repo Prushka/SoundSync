@@ -15,5 +15,6 @@ pub mod protocol;
 pub mod sync;
 pub mod timeline;
 pub mod types;
+pub mod version;
 
 pub use types::{MasterMode, Nanos, NodeId, Os, Role, StreamFormat};

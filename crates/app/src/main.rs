@@ -106,7 +106,7 @@ fn main() -> anyhow::Result<()> {
                 write_icon_png(&p)?;
             }
             if let Some(p) = plist {
-                std::fs::write(&p, macos_bundle::info_plist(env!("CARGO_PKG_VERSION")))?;
+                std::fs::write(&p, macos_bundle::info_plist(soundsync_core::version::PACKAGE_VERSION, soundsync_core::version::build_number()))?;
                 println!("wrote {}", p.display());
             }
             Ok(())

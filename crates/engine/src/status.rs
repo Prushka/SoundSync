@@ -27,6 +27,8 @@ pub struct PeerStatus {
     pub extra_latency_ns: Nanos,
     pub output: Option<OutputInfo>,
     pub rx: Vec<RxStat>,
+    /// The SoundSync it runs, e.g. "0.1.0 (build 42, fcaec3d)".
+    pub app_version: String,
     /// Its Volume slider, once it has reported it.
     pub volume: Option<VolumeStatus>,
     /// Its microphones, once asked for (`Command::ListInputs`).

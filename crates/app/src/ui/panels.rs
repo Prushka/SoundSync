@@ -272,7 +272,7 @@ fn group_table(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
         ui.label(st.streams.iter().find(|s| s.master != st.node_id).map_or("—".into(), sync_label));
         ui.end_row();
         for p in &st.peers {
-            ui.label(&p.name);
+            ui.label(&p.name).on_hover_text(format!("SoundSync {}", p.app_version));
             ui.label(format!("{:?}", p.os));
             ui.label(role_label(p.role));
             ui.label(fmt_opt_ms(p.rtt_ns));
@@ -498,6 +498,6 @@ fn settings(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
         if ui.button("Open logs").clicked() {
             open_folder(&app.paths.log_dir);
         }
-        ui.label(RichText::new(format!("SoundSync {}", env!("CARGO_PKG_VERSION"))).weak());
+        ui.label(RichText::new(format!("SoundSync {}", soundsync_core::version::version())).weak());
     });
 }

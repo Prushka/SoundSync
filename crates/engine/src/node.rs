@@ -30,7 +30,6 @@ const HELLO_RETRY_NS: Nanos = 1_000_000_000;
 /// How long a datagram from another SoundSync version keeps its warning up.
 const OTHER_VERSION_WARNING_NS: Nanos = 10_000_000_000;
 const STATUS_EVERY_NS: Nanos = 100_000_000;
-pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) struct Node {
     pub config: Config,
@@ -187,7 +186,7 @@ impl Node {
             reply,
             name: self.config.node.name.clone(),
             os: Os::current(),
-            app_version: APP_VERSION.into(),
+            app_version: soundsync_core::version::version().into(),
             group: self.config.network.group.clone(),
             session: self.session,
         })
@@ -457,6 +456,7 @@ impl Node {
                     extra_latency_ns: p.state.as_ref().map_or(0, |s| s.extra_latency_ns),
                     output: p.state.as_ref().and_then(|s| s.output.clone()),
                     rx: p.state.as_ref().map_or_else(Vec::new, |s| s.rx.clone()),
+                    app_version: p.app_version.clone(),
                     volume: p.state.as_ref().map(|s| VolumeStatus { volume: s.volume, muted: s.muted, device: s.device_volume }),
                     inputs: p.inputs.clone(),
                 })

@@ -31,8 +31,8 @@ again and echo).
 
 ## Install on Windows
 
-1. Download `SoundSync-windows-x64.zip` (from the GitHub Actions *build* run, artifact
-   *SoundSync-windows-x64*) and extract it.
+1. Download `SoundSync-windows-x64.zip` from the newest release on the repository's GitHub *Releases*
+   page and extract it.
 2. In PowerShell, run:
 
    ```powershell
@@ -95,7 +95,8 @@ Replacing the file by hand works too: **Quit** SoundSync from the tray (a runnin
 copy the new `soundsync.exe` over `%LOCALAPPDATA%\Programs\SoundSync\soundsync.exe` and start it.
 
 Update every PC in a group to the same release: versions with a different network protocol cannot talk to
-each other.
+each other. Each release is one build, e.g. *SoundSync 0.1.0 (build 42)*. Settings shows the build a
+device runs, and hovering over a device's name in the group table shows that device's build.
 
 ### Uninstalling
 
@@ -124,8 +125,8 @@ default output when broadcasting stops, when it quits and, after a crash, at its
 
 ## Install on macOS
 
-1. Download `SoundSync-macos-universal.zip` (artifact *SoundSync-macos-universal*), unzip it and move
-   `SoundSync.app` to `/Applications`.
+1. Download `SoundSync-macos-universal.zip` from the newest release on the *Releases* page, unzip it and
+   move `SoundSync.app` to `/Applications`.
 2. The app is ad-hoc signed, not notarised. On first launch, right-click it and choose **Open**, or run:
 
    ```sh
@@ -252,6 +253,11 @@ cargo test --workspace
 pwsh scripts/build-windows.ps1     # → dist/SoundSync-windows-x64.zip
 bash scripts/bundle-macos.sh       # on macOS → dist/SoundSync-macos-universal.zip
 ```
+
+Every push to `main` that builds and passes its tests on both Windows and macOS is published as a GitHub
+release: tagged `v<version>-build.<n>`, with both zips attached and notes listing the commits since the
+previous release (`.github/workflows/build.yml`, `scripts/publish-release.sh`). CI builds show their build
+number and commit as their version; local builds show `(dev)`.
 
 For local testing, `--config <file>` (or `--instance <name>`) runs a second instance with its own settings;
 `soundsync devices` lists audio devices with their formats and layouts, and `soundsync run` runs a node

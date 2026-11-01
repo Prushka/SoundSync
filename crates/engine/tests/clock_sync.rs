@@ -68,3 +68,15 @@ fn peer_expires_after_5s() {
     assert!(wait_until(Duration::from_millis(6500), || a.engine.status().peers.is_empty()));
     a.shutdown();
 }
+
+#[test]
+fn peers_report_which_soundsync_build_they_run() {
+    // Shown when hovering a device in the group table: every device should run the same build.
+    let a = spawn("a", FakeClock::default(), |_| {});
+    let b = spawn_linked("b", FakeClock::default(), &[&a], |_| {});
+    let version_of_b = || a.engine.status().peers.iter().find(|p| p.name == "b").map(|p| p.app_version.clone());
+    assert!(wait_until(Duration::from_secs(5), || version_of_b().is_some()));
+    assert_eq!(version_of_b().unwrap(), soundsync_core::version::version());
+    b.shutdown();
+    a.shutdown();
+}

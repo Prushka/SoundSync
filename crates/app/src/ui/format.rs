@@ -142,6 +142,7 @@ mod tests {
             clock_offset_ns: None,
             extra_latency_ns: 0,
             output: None,
+            app_version: "0.1.0 (dev)".into(),
             volume: None,
             inputs: None,
             rx: rx_from.map(|m| vec![RxStat { master: m, stream_id: 1, sync_error_ns: 0, behind_ns: 0, lost_frames: 0 }]).unwrap_or_default(),

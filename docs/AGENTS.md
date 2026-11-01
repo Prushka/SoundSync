@@ -31,8 +31,8 @@ SoundSync is LAN multi-room audio written in Rust.
 | `crates/engine` (`soundsync-engine`) | A headless node. Covers: <br>• `net` (UDP socket and receive thread) <br>• `discovery` (mDNS) <br>• `peers` <br>• `node` (engine thread, commands, status) <br>• `streams` (output, capture, slots, gossip, group delay) <br>• `sender` / `receiver` (capture → packets; render mixer) <br>• `calibration`, `synctest`, `volume` <br>• `devices` (hot-plug and reopen) <br>• `defaults` (Windows default-output switching) <br>• `power` (sleep detection) |
 | `crates/app` (`soundsync` binary) | CLI (`cli.rs`), GUI (`ui/`: `app.rs`, `panels.rs`, `format.rs`, `tray.rs`, `vbcable.rs`, `config_watch.rs`), logging, single instance, autostart, Windows session end, macOS bundle metadata, icon (`icon.rs`, gold "Sparkle" style). |
 | `crates/engine/tests/` | Integration tests: several in-process nodes over 127.0.0.1 on `FakeHost`s (helpers in `common/mod.rs`). |
-| `scripts/` | `build-windows.ps1` (→ `dist/SoundSync-windows-x64.zip`), `install-windows.ps1`, `uninstall-windows.ps1`, `bundle-macos.sh`. |
-| `.github/workflows/build.yml` | CI on `windows-latest` and `macos-latest`: test, clippy `-D warnings`, package, upload artifacts. |
+| `scripts/` | `build-windows.ps1` (→ `dist/SoundSync-windows-x64.zip`), `install-windows.ps1`, `uninstall-windows.ps1`, `bundle-macos.sh`, `publish-release.sh` and `release-notes.sh` (CI release). |
+| `.github/workflows/build.yml` | CI on `windows-latest` and `macos-latest`: test (one at a time), clippy `-D warnings`, package, upload artifacts. On pushes to `main` that pass, a `release` job publishes a GitHub release with both zips. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Original design and 27-task plan (2026-10-30/31), and the volume-matching design (2026-10-31). |
 | `.superpowers/sdd/2026-10-31-soundsync/` | **Local only** (git-ignored by its own `.gitignore`): the build ledger `progress.md` and PowerShell helper scripts (see [Real-hardware testing](#real-hardware-testing)). |
 
@@ -54,6 +54,25 @@ bash scripts/bundle-macos.sh                          # on macOS: universal .app
 
 CI runs the tests **one at a time** (`RUST_TEST_THREADS=1` in `build.yml`). Locally they run in parallel,
 which is fine on a machine with many cores.
+
+**Versions and releases:**
+
+- **The version label** comes from `soundsync_core::version::version()`.
+  - CI sets `SOUNDSYNC_BUILD` (the workflow run number) and `SOUNDSYNC_COMMIT` (the short SHA) at compile
+    time, which gives "0.1.0 (build 42, fcaec3d)". Local builds say "0.1.0 (dev)".
+  - The label appears in Settings, the log's first line, `soundsync --version`, the HELLO handshake (peers
+    show it on hover in the group table) and the mDNS TXT record.
+  - The macOS bundle's `CFBundleVersion` is the build number.
+- **Every push to `main`** that passes on both systems is published by `scripts/publish-release.sh`:
+  - Tag `v<workspace version>-build.<run number>`, title "SoundSync 0.1.0 (build 42)", marked Latest.
+  - Assets: `SoundSync-windows-x64.zip` and `SoundSync-macos-universal.zip`.
+  - Notes come from `scripts/release-notes.sh`: commit subjects and bodies since the previous release,
+    without trailers. Preview them locally with
+    `bash scripts/release-notes.sh v0.1.0-build.0 <previous tag or commit> https://github.com/<owner>/<repo>`.
+  - A newer push cancels an older run still in progress, so releases never come out of order.
+  - Re-running a build updates its release.
+  - Bump `version` in the workspace `Cargo.toml` for a new release line. Don't create `v*-build.*` tags by
+    hand.
 
 Before calling a change done, run these, all green:
 
@@ -362,6 +381,7 @@ review rulings are recorded in the local ledger. The decisions most likely to ma
 | Remote mic lists on request (`ListInputs`), not in gossip | Enumerating every second is costly, and lists can overflow a datagram. |
 | Silence on CABLE Input is a note, not a warning | Usually nothing is playing at all (a paused video keeps its session). |
 | Protocol v2, with a version-mismatch warning | Mixed versions used to fail silently. |
+| A GitHub release for every push to `main` that passes; build number and commit stamped into the app (owner's choice over a rolling release or tag-only releases) | Every build is downloadable from one page without an Actions login (artifacts expire after 90 days), and each device shows exactly which build it runs. |
 
 ## History
 

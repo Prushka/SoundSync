@@ -10,7 +10,7 @@ use soundsync_core::Nanos;
 use soundsync_core::layout::describe;
 
 #[derive(Parser, Debug)]
-#[command(name = "soundsync", version, about = "Synchronized multi-room audio over the LAN")]
+#[command(name = "soundsync", version = soundsync_core::version::version(), about = "Synchronized multi-room audio over the LAN")]
 pub struct Cli {
     /// Use this config file instead of the per-user default.
     #[arg(long, global = true)]
