@@ -421,6 +421,7 @@ review rulings are recorded in the local ledger. The decisions most likely to ma
 | `fcaec3d` | CI runs tests one at a time (the macOS job failed two timing tests from tests running in parallel on 3 vCPUs). |
 | `7db1a22` | Release per push to `main` (tag `v<version>-build.<n>`, both zips, notes from commits); build number and commit stamped into the app. |
 | `fee635c` | Exact group-delay checks only where timers are punctual (the macOS runner's timers oversleep even with serial tests). |
+| `3c58d96` | Calibration tests judge individual sweeps only when no speaker underran (a stalled fake speaker cut the start off a sweep on the macOS runner). |
 
 ## Open items and known limitations
 
