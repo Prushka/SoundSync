@@ -87,16 +87,23 @@ Every device's Volume and mute can also be changed from any other device, in the
 
 ### Updating
 
-Run the new release's `install-windows.ps1` (add `-NoFirewall` if the rule already exists, to skip the
-administrator prompt). It quits the running SoundSync, replaces the program and starts it again; settings,
-logs and the firewall rule (tied to the program's path) stay as they are.
+SoundSync checks for a newer release by itself, 10 seconds after it starts and then every 6 hours. It asks
+GitHub (`api.github.com`) for the latest release and sends nothing else. When there is one, the window shows
+*SoundSync build 9 is available* and the tray menu gets **Update to build 9**. Click **Update and restart**:
+SoundSync downloads the release, checks its SHA-256 digest, puts the new `soundsync.exe` in place of the one
+that's running (wherever it is) and starts it again. Settings, logs, shortcuts and the firewall rule (tied to
+the program's path) stay as they are. **Settings ▸ Updates** shows the version and has **Check for
+updates**.
 
-Replacing the file by hand works too: **Quit** SoundSync from the tray (a running exe cannot be replaced),
-copy the new `soundsync.exe` over `%LOCALAPPDATA%\Programs\SoundSync\soundsync.exe` and start it.
+If SoundSync can't write to its own folder (for example a copy in `Program Files`), it says so. Update by hand
+instead: run the new release's `install-windows.ps1` (add `-NoFirewall` if the rule already exists, to skip
+the administrator prompt). It quits the running SoundSync, replaces the program and starts it again.
+Replacing the file works too: **Quit** SoundSync from the tray (a running exe cannot be replaced), copy the
+new `soundsync.exe` over `%LOCALAPPDATA%\Programs\SoundSync\soundsync.exe` and start it.
 
 Update every PC in a group to the same release: versions with a different network protocol cannot talk to
-each other. Each release is one build, e.g. *SoundSync 0.1.0 (build 42)*. Settings shows the build a
-device runs, and hovering over a device's name in the group table shows that device's build.
+each other. Each release is one build, e.g. *SoundSync 0.1.0 (build 42)*. **Settings ▸ Updates** shows the
+build a device runs, and hovering over a device's name in the group table shows that device's build.
 
 ### Uninstalling
 
@@ -105,8 +112,8 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\SoundSync\u
 ```
 
 (or the `uninstall-windows.ps1` in the release folder). It quits SoundSync, puts back the default output
-devices if SoundSync left them switched, removes the shortcuts, the program and the firewall rule (asking for
-administrator rights only if the rule exists). Settings and logs are kept unless you add `-Purge`;
+devices if SoundSync left them switched, removes the shortcuts, the program (and what an interrupted update
+left next to it) and the firewall rule (asking for administrator rights only if the rule exists). Settings and logs are kept unless you add `-Purge`;
 `-NoFirewall` leaves the firewall rule. VB-CABLE is a separate program: uninstall it from *Apps & features*.
 
 ### VB-CABLE (for VB-CABLE mode)
@@ -139,6 +146,10 @@ default output when broadcasting stops, when it quits and, after a crash, at its
    again in the same place.
 
 SoundSync appears in the menu bar. **Settings ▸ Start at login** adds a login item that starts it hidden.
+
+SoundSync.app updates itself as on Windows (**Update and restart**), as long as it runs from Applications: a
+copy opened straight from Downloads runs from a read-only place, and SoundSync asks you to move it first.
+After an update macOS may ask again for microphone and Local Network access.
 
 ## Configuration
 

@@ -79,6 +79,12 @@ try {
             Write-Host "Removed $file"
         }
     }
+    # Left behind if an update was interrupted (the app deletes it at its next start).
+    $UpdateDir = Join-Path $InstallDir '.soundsync-update'
+    if (Test-Path -LiteralPath $UpdateDir) {
+        Remove-Item -LiteralPath $UpdateDir -Recurse -Force
+        Write-Host "Removed $UpdateDir"
+    }
     if ((Test-Path -LiteralPath $InstallDir) -and -not (Get-ChildItem -LiteralPath $InstallDir -Force)) {
         Remove-Item -LiteralPath $InstallDir
     }

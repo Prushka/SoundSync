@@ -30,10 +30,11 @@ SoundSync is LAN multi-room audio written in Rust.
 | `crates/audio` (`soundsync-audio`) | The `AudioHost` trait and its backends: <br>• `win/` (WASAPI via `wasapi` 0.26 + `windows` 0.62) <br>• `mac/` (CoreAudio via `coreaudio-rs` / `objc2-core-audio`) <br>• `fake.rs` (virtual clocks, devices, rooms and mics for tests) <br>• `null.rs` (timer-driven discard output) <br>• `select.rs` (device-name resolution) <br>• `measure.rs` (loopback diagnostics) |
 | `crates/engine` (`soundsync-engine`) | A headless node. Covers: <br>• `net` (UDP socket and receive thread) <br>• `discovery` (mDNS) <br>• `peers` <br>• `node` (engine thread, commands, status) <br>• `streams` (output, capture, slots, gossip, group delay) <br>• `sender` / `receiver` (capture → packets; render mixer) <br>• `calibration`, `synctest`, `volume` <br>• `devices` (hot-plug and reopen) <br>• `defaults` (Windows default-output switching) <br>• `power` (sleep detection) |
 | `crates/app` (`soundsync` binary) | CLI (`cli.rs`), GUI (`ui/`: `app.rs`, `panels.rs`, `format.rs`, `tray.rs`, `vbcable.rs`, `config_watch.rs`), logging, single instance, autostart, Windows session end, macOS bundle metadata, icon (`icon.rs`, gold "Sparkle" style). |
+| `crates/app/src/update/` | Self-update from GitHub releases: <br>• `release.rs` (release JSON, tag → build number, asset per OS, relaunch arguments) <br>• `fetch.rs` (`ureq` with native TLS; download with size and SHA-256 checks) <br>• `install.rs` (where this copy lives, staging, `--version` check, rename swap with rollback, relaunch, cleanup) <br>• `mod.rs` (`Updater` thread and the `UpdateState` the UI shows) |
 | `crates/engine/tests/` | Integration tests: several in-process nodes over 127.0.0.1 on `FakeHost`s (helpers in `common/mod.rs`). |
 | `scripts/` | `build-windows.ps1` (→ `dist/SoundSync-windows-x64.zip`), `install-windows.ps1`, `uninstall-windows.ps1`, `bundle-macos.sh`, `publish-release.sh` and `release-notes.sh` (CI release). |
 | `.github/workflows/build.yml` | CI on `windows-latest` and `macos-latest`: test (one at a time), clippy `-D warnings`, package, upload artifacts. On pushes to `main` that pass, a `release` job publishes a GitHub release with both zips. |
-| `docs/superpowers/specs/`, `docs/superpowers/plans/` | Original design and 27-task plan (2026-10-30/31), and the volume-matching design (2026-10-31). |
+| `docs/superpowers/specs/`, `docs/superpowers/plans/` | Original design and 27-task plan (2026-10-30/31), the volume-matching design (2026-10-31), and the self-update design and plan (2026-11-01). |
 | `.superpowers/sdd/2026-10-31-soundsync/` | **Local only** (git-ignored by its own `.gitignore`): the build ledger `progress.md` and PowerShell helper scripts (see [Real-hardware testing](#real-hardware-testing)). |
 
 ## Build, test and run
@@ -228,6 +229,25 @@ Paths:
   restores them when broadcasting stops, on exit, on `WM_ENDSESSION` (a hidden window in `session_end.rs`),
   and at the next start after a crash. Roles that can't be restored stay pending for 10 minutes.
 
+### Updates (`app/src/update/`)
+
+- **Checks:** the `soundsync-update` thread asks `/releases/latest` 10 s after start, then every 6 h, and on
+  **Check for updates**. Newer means a greater build number in the tag. A release without our OS's asset or
+  without a `sha256` digest is ignored. Failed automatic checks are only logged; manual ones are shown.
+- **Who can update:** dev builds (no `SOUNDSYNC_BUILD`) never check. On macOS only a `SoundSync.app` that
+  isn't translocated (opened from Downloads with the quarantine flag) can.
+- **Install (on click):** download, check size and SHA-256, unpack into `<dir>/.soundsync-update/new/` next
+  to the exe or bundle, and run the new copy's `--version` (up to 30 s; Defender may scan it first). The
+  UI thread then swaps by renaming: the running copy to `.soundsync-update/old/`, the new one into its place,
+  and back if the second rename fails.
+- **Restart:** `on_exit` stops the engine, drops the instance guard, ends the log session, and starts the new
+  copy with the same arguments (`--show` if the window was open; `--background` on macOS if it was hidden).
+  If that start fails, it swaps back and starts the old copy. The new copy shows "Updated to SoundSync …"
+  when `old/` exists and deletes `.soundsync-update`, retrying for 20 s while the old process exits.
+- **Log marker:** `.running` holds the process id. The new copy archives `soundsync.log` while the old one
+  is still exiting, so a process only removes its own marker, and the old one removes it before the
+  relaunch (otherwise the old log is labelled `-recovered` and the new session loses crash detection).
+
 ## Conventions
 
 - **Style:** idiomatic Rust 2024, long lines, no rustfmt. Every module starts with a `//!` doc saying what it
@@ -404,6 +424,10 @@ review rulings are recorded in the local ledger. The decisions most likely to ma
 | Silence on CABLE Input is a note, not a warning | Usually nothing is playing at all (a paused video keeps its session). |
 | Protocol v2, with a version-mismatch warning | Mixed versions used to fail silently. |
 | A GitHub release for every push to `main` that passes; build number and commit stamped into the app (owner's choice over a rolling release or tag-only releases) | Every build is downloadable from one page without an Actions login (artifacts expire after 90 days), and each device shows exactly which build it runs. |
+| Self-update checks automatically but installs only on click (owner's choice), for Windows and macOS | An update restarts audio on every speaker, so the user picks the moment; the prompt also says to update the other devices. |
+| `ureq` with native TLS (SChannel / Security.framework), `zip` with the pure-Rust deflate backend | rustls needs ring or aws-lc, whose C build breaks the `--target aarch64-apple-darwin` cross-check from Windows. |
+| Replace the running copy in place by renaming it aside, not with a helper process or installer | A running exe can't be overwritten but can be renamed; the firewall rule and shortcuts point at the path, so they keep working. Rollback is one rename. |
+| Relaunch from `on_exit` after dropping the engine and the instance guard, with no new flag | The new copy becomes the primary instance and gets the port and devices; any older target build starts this way. |
 
 ## History
 
@@ -427,6 +451,7 @@ the commit by its summary line (find it with `git log --grep`).
 | `7db1a22` | Release per push to `main` (tag `v<version>-build.<n>`, both zips, notes from commits); build number and commit stamped into the app. |
 | `fee635c` | Exact group-delay checks only where timers are punctual (the macOS runner's timers oversleep even with serial tests). |
 | `3c58d96` | Calibration tests judge individual sweeps only when no speaker underran (a stalled fake speaker cut the start off a sweep on the macOS runner). |
+| `47afa1b` … "Updates: uninstall cleanup, README and guide" | Self-update from GitHub releases: check every 6 h, Update and restart (header, Settings ▸ Updates, tray), in-place rename swap and relaunch; the log marker holds the process id. Verified end to end on Windows from build 7 to the real build 8. |
 
 ## Open items and known limitations
 
@@ -436,6 +461,8 @@ the commit by its summary line (find it with `git log --grep`).
   - A README section on running the exe without installing.
 - **macOS runtime is unverified** (compile-checked only): CoreAudio timing, volume and dB setting, the HAL
   run loop, the LaunchAgent, the bundle. The Mac must run the current protocol version.
+- **macOS self-update is unverified** (compile-checked only): `ditto`, `codesign --verify`, the bundle swap
+  and `open -n` relaunch. Check it on the MacBook with the first release that has the updater.
 - **Not implemented:**
   - An optional inaudible keep-awake signal for TVs that mute after silence.
   - Per-stream volume and mute (in the original spec).
