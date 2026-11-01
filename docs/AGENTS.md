@@ -260,6 +260,8 @@ Paths:
     only when no speaker underran during the run (`speakers_underran_since`).
 - **Commits:** an imperative summary line, then a short body of bullets. End the message with the
   `Co-Authored-By:` trailer the system specifies. Commit to `main`, and **never push**.
+- **This guide** is updated in the same commit as the work it describes: gotchas, decisions, open items and
+  the [History](#history) row. Don't make separate "AGENTS.md: history" commits.
 
 ## Gotchas (learned the hard way)
 
@@ -404,6 +406,9 @@ review rulings are recorded in the local ledger. The decisions most likely to ma
 | A GitHub release for every push to `main` that passes; build number and commit stamped into the app (owner's choice over a rolling release or tag-only releases) | Every build is downloadable from one page without an Actions login (artifacts expire after 90 days), and each device shows exactly which build it runs. |
 
 ## History
+
+Add the row in the commit that makes the change. A commit can't contain its own hash, so a new row names
+the commit by its summary line (find it with `git log --grep`).
 
 | Commit | Change |
 |---|---|
