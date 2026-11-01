@@ -26,6 +26,11 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq.workspace = true
+zip.workspace = true
 
 [build-dependencies]
 ico = "0.6"

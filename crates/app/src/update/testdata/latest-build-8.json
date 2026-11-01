@@ -1,0 +1,21 @@
+{
+  "tag_name": "v0.1.0-build.8",
+  "name": "SoundSync 0.1.0 (build 8)",
+  "html_url": "https://github.com/Prushka/SoundSync/releases/tag/v0.1.0-build.8",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "SoundSync-macos-universal.zip",
+      "size": 13522724,
+      "digest": "sha256:9707a91d505c8553a97855f55b5b10d6ca7f527a24b092c7080ca385a609d2b1",
+      "browser_download_url": "https://github.com/Prushka/SoundSync/releases/download/v0.1.0-build.8/SoundSync-macos-universal.zip"
+    },
+    {
+      "name": "SoundSync-windows-x64.zip",
+      "size": 7782375,
+      "digest": "sha256:6a98aa5e00336c52df74af59a8e3627fe87e6626634e906a644741a2508a04f4",
+      "browser_download_url": "https://github.com/Prushka/SoundSync/releases/download/v0.1.0-build.8/SoundSync-windows-x64.zip"
+    }
+  ]
+}
