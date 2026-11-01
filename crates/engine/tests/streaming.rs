@@ -211,30 +211,23 @@ fn direct_mode_reports_behind() {
 
 #[test]
 fn auto_delay_increases_when_slow_receiver_joins() {
-    let t0 = now();
     let m = virtual_master("m", "TV");
     let fast = receiver("fast", FakeClock::default(), &m, "Speaker", 0.0, 5, None);
     m.engine.command(Command::SetBroadcast(true));
     sleep(Duration::from_secs(4));
     let before = m.engine.status().delay_ns.unwrap();
     let slow = receiver("slow", FakeClock::default(), &m, "Bluetooth", 0.0, 150, None);
-    assert!(wait_until(Duration::from_secs(8), || m.engine.status().delay_ns.unwrap() >= 155 * MS), "D stayed at {} ms", m.engine.status().delay_ns.unwrap() / MS);
-    // The first estimate comes from the device lead; the measured requirement may refine it.
-    let mut d = m.engine.status().delay_ns.unwrap();
-    let mut stable_since = now();
-    while now() - stable_since < 3_000_000_000 {
-        sleep(Duration::from_millis(100));
-        let cur = m.engine.status().delay_ns.unwrap();
-        if cur != d {
-            d = cur;
-            stable_since = now();
-        }
-        assert!(now() - t0 < 30_000_000_000, "group delay never settled (last {} ms)", d / MS);
-    }
-    assert!(d > before && d >= 155 * MS);
-    sleep(Duration::from_millis(500));
-    let from = stable_since + 1_000_000_000;
-    assert_in_sync(&m, "CABLE Input", &[(&m, "TV", 0), (&fast, "Speaker", 0), (&slow, "Bluetooth", 0)], &[d], from, now() - d - 50 * MS, MS, false);
+    assert!(wait_until(Duration::from_secs(8), || {
+        let d = m.engine.status().delay_ns.unwrap();
+        d > before && d >= 155 * MS
+    }), "D stayed at {} ms (before {} ms)", m.engine.status().delay_ns.unwrap() / MS, before / MS);
+    // The first estimate comes from the device lead; measured requirements can still grow
+    // later on a slow runner. Track the whole window instead of assuming the delay settles.
+    let t0 = now();
+    let delays = DelayLog::record(&m, Duration::from_secs(4));
+    let from = at(t0, 1.0);
+    let to = now() - m.engine.status().delay_ns.unwrap() - 50 * MS;
+    assert_in_sync(&m, "CABLE Input", &[(&m, "TV", 0), (&fast, "Speaker", 0), (&slow, "Bluetooth", 0)], &delays.during(from, to), from, to, MS, false);
     slow.shutdown();
     fast.shutdown();
     m.shutdown();

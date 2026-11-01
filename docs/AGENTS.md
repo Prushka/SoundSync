@@ -306,6 +306,10 @@ Paths:
   - `first_stream_…` and `restarted_stream_…` skip entirely.
   - `virtual_mode_three_outputs_in_sync` skips only its "stable after warm-up" check, and checks sync
     against every delay in effect.
+  - `auto_delay_increases_when_slow_receiver_joins` records the measurement window with `DelayLog`.
+    Even after three apparently stable seconds, the delay can grow during the final wait (build 10
+    compared pulses against a stale 240 ms and reported them about 10 ms late). It still requires
+    the delay to increase for the new receiver and every speaker to stay within 1 ms of a recorded delay.
 
   To see what a delay decision was based on, temporarily log `peer_requirements` in
   `update_presentation_offset`. `run-under-load.ps1` runs one test with its output shown while a second
@@ -461,6 +465,7 @@ the commit by its summary line (find it with `git log --grep`).
 | `3c58d96` | Calibration tests judge individual sweeps only when no speaker underran (a stalled fake speaker cut the start off a sweep on the macOS runner). |
 | `47afa1b` … "Updates: uninstall cleanup, README and guide" | Self-update from GitHub releases: check every 6 h, Update and restart (header, Settings ▸ Updates, tray), in-place rename swap and relaunch; the log marker holds the process id. Verified end to end on Windows from build 7 to the real build 8. |
 | "Fix CI audio simulation and elapsed-time assertions" | Fix fake-room sample collisions behind calibration level errors; use elapsed time for the null-output rate test when CI oversleeps. Add deterministic sample-boundary and mixing regressions without relaxing calibration tolerances. |
+| "Track delay changes throughout the slow-receiver CI test" | Fix the remaining macOS build 10 failure by measuring the group-delay history instead of assuming it stays fixed after settling. Reproduced with a late 10 ms step; keep the 1 ms sync tolerance and the delay-increase assertion. |
 
 ## Open items and known limitations
 
