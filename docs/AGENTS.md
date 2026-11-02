@@ -304,8 +304,10 @@ Paths:
   false there, and measured requirements drift a 5 ms step at any moment. So tests skip their
   exact group-delay comparisons there:
   - `first_stream_…` and `restarted_stream_…` skip entirely.
-  - `virtual_mode_three_outputs_in_sync` skips only its "stable after warm-up" check, and checks sync
-    against every delay in effect.
+  - `virtual_mode_three_outputs_in_sync` checks that auto delay never shrinks and every speaker
+    stays in sync against the delay history. A short timer probe after the run cannot establish
+    that earlier capture/device scheduling was punctual (Windows build 13 grew from 85 to 90 ms).
+    `DelayPolicy` unit tests check stability when requirements do not change.
   - `auto_delay_increases_when_slow_receiver_joins` records the measurement window with `DelayLog`.
     Even after three apparently stable seconds, the delay can grow during the final wait (build 10
     compared pulses against a stale 240 ms and reported them about 10 ms late). It still requires
@@ -476,6 +478,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Fix CI audio simulation and elapsed-time assertions" | Fix fake-room sample collisions behind calibration level errors; use elapsed time for the null-output rate test when CI oversleeps. Add deterministic sample-boundary and mixing regressions without relaxing calibration tolerances. |
 | "Track delay changes throughout the slow-receiver CI test" | Fix the remaining macOS build 10 failure by measuring the group-delay history instead of assuming it stays fixed after settling. Reproduced with a late 10 ms step; keep the 1 ms sync tolerance and the delay-increase assertion. |
 | "Fix CI timing assertions for audio and microphone discovery" | Fix build 12's macOS streaming assertions: measure first emitted audio instead of the later `Playing` state, and identify pulses erased by exact fake-output gaps. Add a controlled stall and negative assertion regressions; retain the 600 ms startup bound, 1 ms sync tolerance and minimum audio coverage. Hold the inventory probe explicitly while clock discovery completes. No production syncing changes. |
+| "Check auto-delay monotonicity across runner scheduling changes" | Fix the Windows build 13 assertion that presumed fixed requirements after warm-up based on a later timer probe. Allow legitimate increases, reject decreases, and retain the 1 ms checks on all three speakers against the delay history. Fixed-requirement stability remains covered by deterministic `DelayPolicy` tests. |
 
 ## Open items and known limitations
 

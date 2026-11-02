@@ -44,10 +44,10 @@ fn virtual_mode_three_outputs_in_sync() {
     let delays = DelayLog::record(&m, Duration::from_secs(4));
     let st = m.engine.status();
     assert!(st.broadcasting);
-    if timers_are_punctual() {
-        // Where timers oversleep, requirements drift and the delay may step up (see below).
-        assert_eq!(st.delay_ns, Some(d), "delay must be stable after warm-up");
-    }
+    // A brief timer probe at the end cannot prove that capture and device threads stayed
+    // punctual throughout this window. Auto delay may grow with their requirements, but
+    // must not shrink. Stability for unchanged requirements is tested in DelayPolicy.
+    assert!(st.delay_ns.expect("broadcast has a group delay") >= d, "auto delay must not shrink within a stream");
     assert_eq!(d % (5 * MS), 0);
     assert!(d >= 45 * MS, "D {} ms", d / MS);
     let outputs = [(&m, "TV", 0), (&r1, "Laptop", 0), (&r2, "Speaker", 0)];
