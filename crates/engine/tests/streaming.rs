@@ -4,7 +4,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use common::*;
-use soundsync_audio::fake::FakeClock;
+use soundsync_audio::fake::{FakeClock, FakeSignal, FakeSourceSpec};
 use soundsync_core::config::Config;
 use soundsync_core::{MasterMode, StreamFormat};
 use soundsync_engine::Command;
@@ -143,20 +143,62 @@ fn restarted_stream_starts_with_the_delay_the_receivers_needed() {
 #[test]
 fn receivers_start_playing_promptly() {
     // A new stream is announced and subscribed to at once, not on the next 1 s gossip round.
-    let m = virtual_master("m", "TV");
+    // A continuous tone lets us measure the first audio, without waiting for a 200 ms pulse.
+    let m = spawn_with(
+        Spec::new("m"),
+        |c| {
+            c.master.capture_device = "CABLE Input".into();
+            c.master.monitor_device = "TV".into();
+        },
+        |h| {
+            h.add_source(FakeSourceSpec { signal: FakeSignal::Sine { hz: 440.0, amplitude: 0.8 }, ..pulse_source("CABLE Input", 0) });
+            h.add_output(output("TV", 50.0, 15, 0));
+        },
+    );
     let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
     assert!(wait_until(Duration::from_secs(3), || r1.engine.status().peers.iter().all(|p| p.clock_offset_ns.is_some()) && !r1.engine.status().peers.is_empty()));
     for round in 0..3 {
-        let start = std::time::Instant::now();
+        let prior_onsets = r1.host.onsets("Laptop").len();
+        let start = now();
         m.engine.command(Command::SetBroadcast(true));
-        let playing = || r1.engine.status().streams.iter().any(|s| s.state == soundsync_core::player::PlayState::Playing);
+        let mut first_audio = None;
+        let playing = || {
+            let status = r1.engine.status();
+            // Behind also plays audio; Waiting does not. Timing correction can need a later
+            // gossip round on a coarse timer, but it must not count as delayed subscription.
+            let active = status.streams.iter().any(|s| matches!(s.state,
+                soundsync_core::player::PlayState::Playing | soundsync_core::player::PlayState::Behind));
+            first_audio = r1.host.onsets("Laptop").into_iter().skip(prior_onsets).find(|t| *t >= start);
+            active && first_audio.is_some()
+        };
         assert!(wait_until(Duration::from_secs(3), playing), "round {round}: never played");
-        let took = start.elapsed();
-        assert!(took < Duration::from_millis(600), "round {round}: playing after {took:?}");
+        let took = first_audio.unwrap() - start;
+        assert!(took < 600 * MS, "round {round}: first audio after {} ms", took as f64 / 1e6);
         m.engine.command(Command::SetBroadcast(false));
         assert!(wait_until(Duration::from_secs(3), || r1.engine.status().streams.is_empty()), "round {round}: stream not dropped");
     }
     r1.shutdown();
+    m.shutdown();
+}
+
+#[test]
+fn sync_recovers_after_a_simulated_output_stall() {
+    let m = virtual_master("m", "TV");
+    let r = receiver("r", FakeClock::default(), &m, "Laptop", 0.0, 10, None);
+    m.engine.command(Command::SetDelay(soundsync_core::delay::DelaySetting::Manual(250.0)));
+    m.engine.command(Command::SetBroadcast(true));
+    sleep(Duration::from_secs(3));
+    let from = now();
+    let next = m.host.source_pulses("CABLE Input").last().copied().unwrap() + 200 * MS + 250 * MS;
+    // Leave room for the fake device's extra buffering on coarse timers, then stall across
+    // this pulse well after warm-up. Subsequent pulses must recover within the usual 1 ms.
+    assert!(wait_until(Duration::from_secs(1), || now() >= next - 120 * MS));
+    r.host.stall_output("Laptop", Duration::from_millis(300));
+    sleep(Duration::from_secs(3));
+    let gaps = r.host.output_gaps("Laptop");
+    assert!(gaps.iter().any(|gap| gap.contains(&next)), "the planned pulse must fall in the gap: {gaps:?}");
+    assert_in_sync(&m, "CABLE Input", &[(&r, "Laptop", 0)], &[250 * MS], from, now() - 350 * MS, MS, false);
+    r.shutdown();
     m.shutdown();
 }
 

@@ -310,6 +310,15 @@ Paths:
     Even after three apparently stable seconds, the delay can grow during the final wait (build 10
     compared pulses against a stale 240 ms and reported them about 10 ms late). It still requires
     the delay to increase for the new receiver and every speaker to stay within 1 ms of a recorded delay.
+  - Startup measures the first emitted audio, including when the player reports `Behind`. Waiting
+    for `Playing` also waits for the next group-delay update and mislabels that as slow subscription.
+  - Streaming checks account for a missing pulse only when its expected emission falls inside an
+    exact `FakeHost::output_gaps` interval. Timing errors and unexplained loss still fail; at least
+    80% of the pulses (and at least five) must play. A controlled output stall verifies recovery,
+    and assertion regressions reject unrelated gaps, timing errors and insufficient audio.
+  - The stalled microphone-inventory test holds its probe with an explicit gate. Commands still
+    have a 1 s deadline; establishing both new clock maps may take longer on a loaded runner,
+    and must complete while enumeration is still blocked. The probe lasts at least 2.25 s.
 
   To see what a delay decision was based on, temporarily log `peer_requirements` in
   `update_presentation_offset`. `run-under-load.ps1` runs one test with its output shown while a second
@@ -466,6 +475,7 @@ the commit by its summary line (find it with `git log --grep`).
 | `47afa1b` … "Updates: uninstall cleanup, README and guide" | Self-update from GitHub releases: check every 6 h, Update and restart (header, Settings ▸ Updates, tray), in-place rename swap and relaunch; the log marker holds the process id. Verified end to end on Windows from build 7 to the real build 8. |
 | "Fix CI audio simulation and elapsed-time assertions" | Fix fake-room sample collisions behind calibration level errors; use elapsed time for the null-output rate test when CI oversleeps. Add deterministic sample-boundary and mixing regressions without relaxing calibration tolerances. |
 | "Track delay changes throughout the slow-receiver CI test" | Fix the remaining macOS build 10 failure by measuring the group-delay history instead of assuming it stays fixed after settling. Reproduced with a late 10 ms step; keep the 1 ms sync tolerance and the delay-increase assertion. |
+| "Fix CI timing assertions for audio and microphone discovery" | Fix build 12's macOS streaming assertions: measure first emitted audio instead of the later `Playing` state, and identify pulses erased by exact fake-output gaps. Add a controlled stall and negative assertion regressions; retain the 600 ms startup bound, 1 ms sync tolerance and minimum audio coverage. Hold the inventory probe explicitly while clock discovery completes. No production syncing changes. |
 
 ## Open items and known limitations
 

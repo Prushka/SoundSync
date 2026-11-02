@@ -1,7 +1,9 @@
+//! Endpoint probes can stall independently of peer discovery, commands and engine shutdown.
+
 mod common;
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,7 @@ use soundsync_engine::{Command, Engine, EngineOptions};
 struct InventoryHost {
     inner: Arc<FakeHost>,
     delay: Duration,
+    gate: Mutex<Option<mpsc::Receiver<()>>>,
     fail: AtomicBool,
     queries: AtomicUsize,
     finished: AtomicUsize,
@@ -25,7 +28,14 @@ impl InventoryHost {
     fn new(delay: Duration) -> Arc<Self> {
         let inner = FakeHost::new(FakeClock::default());
         inner.add_mic("USB Mic", 0);
-        Arc::new(Self { inner, delay, fail: AtomicBool::new(false), queries: AtomicUsize::new(0), finished: AtomicUsize::new(0), opens: AtomicUsize::new(0) })
+        Arc::new(Self { inner, delay, gate: Mutex::new(None), fail: AtomicBool::new(false), queries: AtomicUsize::new(0), finished: AtomicUsize::new(0), opens: AtomicUsize::new(0) })
+    }
+
+    /// Dropping the sender releases the probe, including if an assertion panics.
+    fn hold_next_probe(&self) -> mpsc::Sender<()> {
+        let (release, wait) = mpsc::channel();
+        *self.gate.lock().unwrap() = Some(wait);
+        release
     }
 
     fn start(self: &Arc<Self>) -> Engine {
@@ -47,6 +57,10 @@ impl AudioHost for InventoryHost {
         if dir == Direction::Capture {
             self.queries.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(self.delay);
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(wait) = gate {
+                let _ = wait.recv();
+            }
             self.finished.fetch_add(1, Ordering::SeqCst);
             if self.fail.load(Ordering::SeqCst) {
                 return Err(AudioError::Os("temporary inventory failure".into()));
@@ -78,16 +92,21 @@ fn slow_inventory_does_not_block_clocks_commands_or_reset_audio() {
     // Longer than the 2 s resume detector threshold: enumeration on the engine thread used
     // to reset clocks and reopen output here, merely because another node polled its inputs.
     let host = InventoryHost::new(Duration::from_millis(2250));
+    let release_probe = host.hold_next_probe();
     let engine = host.start();
     let b = observer("b", &engine);
     let c = observer("c", &engine);
     assert!(wait_until(Duration::from_secs(2), || host.queries.load(Ordering::SeqCst) == 1));
     engine.command(Command::SetVolume(0.7));
-    assert!(wait_until(Duration::from_secs(1), || {
+    assert!(wait_until(Duration::from_secs(1), || engine.status().volume == 0.7), "commands must progress while the probe is blocked");
+    // Establishing two new clock maps can exceed a second on a loaded runner. Keep the probe
+    // blocked explicitly, so clock sync is proved independent of enumeration at any cadence.
+    assert!(wait_until(Duration::from_secs(4), || {
         let status = engine.status();
-        status.volume == 0.7 && status.peers.len() == 2 && status.peers.iter().all(|p| p.clock_offset_ns.is_some())
-    }), "clock sync and commands must progress while the probe is blocked");
+        status.peers.len() == 2 && status.peers.iter().all(|p| p.clock_offset_ns.is_some())
+    }), "clocks must sync while the probe is blocked: {:?}", engine.status().peers);
     assert_eq!(host.finished.load(Ordering::SeqCst), 0, "probe must still be in progress");
+    drop(release_probe);
     assert!(wait_until(Duration::from_secs(4), || [&b, &c].iter().all(|n| {
         n.engine.status().peers.iter().any(|p| p.inputs.as_ref().is_some_and(|l| l.devices == ["USB Mic"]))
     })));
