@@ -105,6 +105,19 @@ Update every PC in a group to the same release: versions with a different networ
 each other. Each release is one build, e.g. *SoundSync 0.1.0 (build 42)*. **Settings ▸ Updates** shows the
 build a device runs, and hovering over a device's name in the group table shows that device's build.
 
+**Overview ▸ Group** also shows each device's build and update status. Use **Check devices for updates**,
+**Update to build …** on one device, or **Update all outdated devices** for all eligible other devices.
+Each device downloads the latest published release for its own OS, verifies it, and restarts SoundSync.
+The table shows progress, failures and the build after it returns. The computer you are using keeps
+running; its own **Update and restart** is a separate button. Updating pauses audio on the affected devices.
+
+Devices must first have a release that supports remote updates. For an older installation, the group table
+says **Update on this device once to enable remote updates**: use that device's own **Update and restart**,
+or install a release manually. After that first update, remote updates work even if devices cannot play
+audio together because their audio protocol versions differ. The same group name and key are required.
+An unwritable installation folder, a development build, or a Mac app that must be moved to Applications
+is reported in the table and still requires action on that device.
+
 ### Uninstalling
 
 ```powershell

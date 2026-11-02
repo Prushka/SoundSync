@@ -6,7 +6,8 @@ use soundsync_core::calib::CalibKind;
 use soundsync_core::layout::describe;
 use soundsync_core::protocol::VolumeChange;
 use soundsync_core::{MasterMode, Nanos, NodeId, Os};
-use soundsync_engine::{CalibStatus, Command, Status, VolumeStatus};
+use soundsync_engine::{CalibStatus, Command, Status, UpdatePeerStatus, VolumeStatus};
+use soundsync_core::remote_update::{UpdateAction, UpdateState as GroupUpdateState};
 
 use super::app::{SoundSyncApp, Tab};
 use super::format::{fmt_level, fmt_ms, fmt_opt_ms, role_label, sync_label, tray_status_line, update_line, update_status};
@@ -42,7 +43,7 @@ fn header(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
         ui.selectable_value(&mut app.tab, Tab::Settings, "Settings");
     });
     let mut warnings: Vec<String> = app.load_warnings.iter().map(|w| format!("config: {w}")).collect();
-    if st.os == Os::MacOs && st.peers.is_empty() && app.started.elapsed() > std::time::Duration::from_secs(10) {
+    if st.os == Os::MacOs && st.peers.is_empty() && !st.updates.iter().any(|p| p.online) && st.incompatible_peers.is_empty() && app.started.elapsed() > std::time::Duration::from_secs(10) {
         warnings.push("No devices found — allow SoundSync in System Settings ▸ Privacy & Security ▸ Local Network".into());
     }
     warnings.extend(st.warnings.iter().cloned());
@@ -297,14 +298,26 @@ fn volume_editor(app: &mut SoundSyncApp, ui: &mut egui::Ui, node: NodeId, name: 
 }
 
 fn group_table(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
-    ui.heading("Group");
-    egui::Grid::new("group").striped(true).num_columns(8).spacing([14.0, 6.0]).show(ui, |ui| {
-        for h in ["Name", "OS", "Role", "RTT", "Output latency", "Volume", "Extra latency", "Sync"] {
+    ui.horizontal_wrapped(|ui| {
+        ui.heading("Group");
+        let can_check = st.updates.iter().any(|p| p.online && !p.pending && p.requested.is_none() && !p.state.busy() && !matches!(p.state, GroupUpdateState::Unavailable(_)));
+        if ui.add_enabled(can_check, egui::Button::new("Check devices for updates")).clicked() {
+            app.check_group_updates();
+        }
+        let count = st.updates.iter().filter(|p| p.installable().is_some()).count();
+        if ui.add_enabled(count > 0, egui::Button::new(format!("Update all outdated devices ({count})"))).clicked() {
+            app.update_outdated_devices();
+        }
+    });
+    ui.label(RichText::new("Updates install the latest release and restart SoundSync on the other devices. Their audio will pause.").weak());
+    egui::Grid::new("group").striped(true).num_columns(10).spacing([14.0, 6.0]).show(ui, |ui| {
+        for h in ["Name", "OS", "Build", "Role", "RTT", "Output latency", "Volume", "Extra latency", "Sync", "Update"] {
             ui.label(RichText::new(h).strong());
         }
         ui.end_row();
         ui.label(format!("{} (this PC)", st.name));
         ui.label(format!("{:?}", st.os));
+        ui.label(soundsync_core::version::build_number().unwrap_or("dev"));
         ui.label(role_label(if st.broadcasting { soundsync_core::Role::Master(st.master_mode) } else { soundsync_core::Role::Receiver }));
         ui.label("—");
         ui.label(st.output.as_ref().map_or("—".into(), |o| fmt_ms(o.latency_ns)));
@@ -312,10 +325,22 @@ fn group_table(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
         volume_editor(app, ui, st.node_id, "this PC", Some(own));
         extra_editor(app, ui, st.node_id, st.extra_latency_ns);
         ui.label(st.streams.iter().find(|s| s.master != st.node_id).map_or("—".into(), sync_label));
+        if app.updater.state().installable().is_some() {
+            if ui.button("Update and restart").clicked() {
+                app.updater.install();
+            }
+        } else {
+            ui.vertical(|ui| {
+                ui.set_max_width(240.0);
+                ui.label(super::format::group_update_state(&app.updater.state().for_group()));
+            });
+        }
         ui.end_row();
         for p in &st.peers {
+            let update = st.updates.iter().find(|u| u.id == p.id);
             ui.label(&p.name).on_hover_text(format!("SoundSync {}", p.app_version));
             ui.label(format!("{:?}", p.os));
+            ui.label(update.and_then(|u| u.build).map_or_else(|| super::format::build_label(&p.app_version), |b| b.to_string()));
             ui.label(role_label(p.role));
             ui.label(fmt_opt_ms(p.rtt_ns));
             match &p.output {
@@ -326,12 +351,61 @@ fn group_table(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
             extra_editor(app, ui, p.id, p.extra_latency_ns);
             let rx = p.rx.iter().find(|r| r.master != p.id);
             ui.label(rx.map_or("—".into(), |r| if r.behind_ns > 0 { format!("Behind {:.0} ms", r.behind_ns as f64 / 1e6) } else { format!("±{:.1} ms", r.sync_error_ns.abs() as f64 / 1e6) }));
+            group_update_cell(app, ui, update);
+            ui.end_row();
+        }
+        // Update discovery still works when the node cannot join this version's audio group.
+        for p in st.updates.iter().filter(|u| !st.peers.iter().any(|p| p.id == u.id)) {
+            ui.label(&p.name).on_hover_text(format!("{} · SoundSync {}", p.addr, p.app_version));
+            ui.label(format!("{:?}", p.os));
+            ui.label(p.build.map_or_else(|| "dev".into(), |b| b.to_string()));
+            ui.label(if !p.online { "Offline" } else if p.protocol != soundsync_core::protocol::PROTOCOL_VERSION { "Update required" } else { "Connecting…" });
+            for _ in 0..5 { ui.label("—"); }
+            group_update_cell(app, ui, Some(p));
+            ui.end_row();
+        }
+        for p in st.incompatible_peers.iter().filter(|o| !st.peers.iter().any(|p| p.addr == o.from) && !st.updates.iter().any(|p| p.addr == o.from)) {
+            ui.label(p.from.ip().to_string());
+            ui.label("—");
+            ui.label(if p.version < soundsync_core::protocol::PROTOCOL_VERSION { "Older" } else { "Newer" });
+            ui.label("Update required");
+            for _ in 0..5 { ui.label("—"); }
+            group_update_cell(app, ui, None);
             ui.end_row();
         }
     });
-    if st.peers.is_empty() {
+    if st.peers.is_empty() && st.updates.is_empty() && st.incompatible_peers.is_empty() {
         ui.label(RichText::new("No other SoundSync devices found yet. They must use the same group name (and key).").weak());
     }
+}
+
+fn group_update_cell(app: &SoundSyncApp, ui: &mut egui::Ui, peer: Option<&UpdatePeerStatus>) {
+    ui.vertical(|ui| {
+        ui.set_max_width(240.0);
+        let Some(p) = peer else {
+            ui.label(if app.started.elapsed() < std::time::Duration::from_secs(8) { "Checking update support…" } else { "Update on this device once to enable remote updates." });
+            return;
+        };
+        if let Some(notice) = &p.notice {
+            ui.label(notice);
+        }
+        if let Some(build) = p.installable() {
+            if ui.button(format!("Update to build {build}")).on_hover_text("Download the latest release and restart SoundSync on this device").clicked() {
+                app.update_device(p.id, build);
+            }
+            if let GroupUpdateState::Failed { error, .. } = &p.state {
+                ui.label(RichText::new(error).color(WARN));
+            }
+        } else if p.pending {
+            ui.label("Sending request…");
+        } else if !p.online {
+            ui.label(if matches!(p.requested, Some(UpdateAction::Install { .. })) { "Waiting for the device to restart…" } else { "Offline" });
+        } else if p.requested.is_some() && !p.state.busy() && !matches!(p.state, GroupUpdateState::Failed { .. }) {
+            ui.label("Waiting for the device…");
+        } else {
+            ui.label(super::format::group_update_state(&p.state));
+        }
+    });
 }
 
 fn sync(app: &mut SoundSyncApp, ui: &mut egui::Ui) {

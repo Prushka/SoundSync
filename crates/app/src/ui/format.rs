@@ -81,6 +81,25 @@ fn percent(received: u64, total: u64) -> u64 {
     (received * 100).checked_div(total).unwrap_or(0).min(100)
 }
 
+pub fn build_label(version: &str) -> String {
+    version.split_once("(build ").and_then(|(_, suffix)| suffix.split([',', ')']).next())
+        .filter(|b| !b.is_empty() && b.bytes().all(|c| c.is_ascii_digit())).unwrap_or("dev").to_string()
+}
+
+pub fn group_update_state(state: &soundsync_core::remote_update::UpdateState) -> String {
+    use soundsync_core::remote_update::UpdateState as State;
+    match state {
+        State::Unavailable(reason) => reason.clone(),
+        State::Idle => "Not checked yet".into(),
+        State::Checking => "Checking for updates…".into(),
+        State::UpToDate => "Up to date".into(),
+        State::Available { build } => format!("Build {build} available"),
+        State::Downloading { build, received, total } => format!("Downloading build {build}… {}%", percent(*received, *total)),
+        State::Restarting { build } => format!("Restarting into build {build}…"),
+        State::Failed { error, .. } => format!("Update failed: {error}"),
+    }
+}
+
 /// The update line under the header (every tab), when there is something to act on.
 pub fn update_line(s: &UpdateState) -> Option<String> {
     match s {

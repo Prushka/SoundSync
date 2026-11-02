@@ -159,3 +159,33 @@ works after an interrupted update.
   Build 8 has no updater, but it starts fine because no new flag is used.
 - **macOS:** compile-checked only (clippy `--target aarch64-apple-darwin`). The owner verifies it on the
   MacBook with the first release that has the updater.
+
+## Remote updates from Overview (2026-11-02)
+
+The group table exposes each device's build, its update status, an individual **Update to build …**
+button, **Check devices for updates**, and **Update all outdated devices**. The owner chose the latest
+published release. Bulk installation targets other online devices advertising an available update;
+the controller's own **Update and restart** stays separate. Clicking an update authorizes download and
+restart on the selected devices, with no second confirmation on them. The UI explains that audio pauses.
+
+Management uses authenticated `SSUP` v1 datagrams on the existing UDP socket. This schema is independent
+of the audio protocol and remains stable when the latter changes. Update peers therefore remain visible
+and actionable even when their audio versions cannot communicate. Existing releases without this
+management receiver require one local update; the UI says so instead of offering a nonworking button.
+
+The receiver only accepts requests from an authenticated, admitted update peer at its advertised
+address. Requests target a particular running session and carry increasing request numbers; retries
+reuse the number and cannot enqueue another restart. The receiver remembers handled requests for its
+own session, even if the requesting peer expires. Acknowledgements and status carry errors back to the
+controller. The app handles requests even while its window is hidden.
+
+Each receiver rechecks the official latest-release metadata and uses the existing OS-specific updater,
+including size, checksum, unpacking, version verification, rollback and relaunch. No request supplies a
+download URL, executable, shell command or installation path. If the latest release changed since the
+button was shown, the receiver reports that and requires another click for the newly available build.
+
+The controller retries unacknowledged requests for 8 seconds and retains accepted operations for up to
+6 minutes. A restart is reported successful only after the device returns with the requested or newer
+build. Read-only folders, development builds and unavailable Mac bundles remain visible as errors or
+unavailable statuses. Tests cover authentication, incompatible protocols, replay/session checks, lost
+acknowledgements, restart confirmation and reuse of the existing verified download path.

@@ -12,6 +12,7 @@ pub mod limiter;
 pub mod paths;
 pub mod player;
 pub mod protocol;
+pub mod remote_update;
 pub mod sync;
 pub mod timeline;
 pub mod types;

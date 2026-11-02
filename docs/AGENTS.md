@@ -158,10 +158,14 @@ Paths:
   - Control: postcard-encoded `Control`.
   - Audio: a fixed 49-byte header followed by raw f32 LE samples.
   - Silent: header only, sent after 2 s of digital silence.
-- **`PROTOCOL_VERSION` = 2.** Bump it for **any** wire change, because nodes on different versions can't
+- **`PROTOCOL_VERSION` = 3.** Bump it for **any audio/control wire change**, because nodes on different versions can't
   talk. A mismatching datagram raises the warning "The SoundSync at <ip> runs a different version". Such
   datagrams also count as proof that inbound packets get through, so they don't trigger the firewall
   warning.
+- **Update management has its own frozen v1 wire format** (`core/src/remote_update.rs`, `SSUP` magic) on
+  the same UDP socket. Do not tie it to `PROTOCOL_VERSION`: it must continue to work across audio
+  protocol changes. It uses the same group HMAC and LAN/static-peer admission rules. The existing
+  `SSYN` audio/control wire format is unchanged by remote updates.
 - **Validate** every new numeric field from the network in `control_ok` or `read_audio_header`, and test it
   in `out_of_range_formats_and_values_are_rejected`. Examples:
   - Formats: 8–384 kHz, 1–32 channels.
@@ -248,6 +252,24 @@ Paths:
 - **Log marker:** `.running` holds the process id. The new copy archives `soundsync.log` while the old one
   is still exiting, so a process only removes its own marker, and the old one removes it before the
   relaunch (otherwise the old log is labelled `-recovered` and the new session loses crash detection).
+- **Remote updates:** Overview ▸ Group displays builds and update status, individual update buttons,
+  **Check devices for updates**, and **Update all outdated devices**. Bulk updates only the other online,
+  eligible devices; this computer's own update remains a separate choice. The owner chose the latest
+  published release, not necessarily the controller's build. The receiving app rechecks GitHub; if the
+  advertised latest build changed, it asks for another click rather than installing a stale release.
+- **Transport:** `engine/src/updates.rs` maintains update peers separately from audio peers. Authenticated
+  status/request/acknowledgement messages use the existing UDP port, with no new firewall rule. Requests
+  name the target process session and use increasing request numbers. Retries reuse their number;
+  handled requests remain remembered for the receiving process's session, including across peer expiry.
+  Nothing installs on discovery or an automatic check. No peer-supplied URL, file or command is executed.
+  The app drains requests while hidden, then uses its existing download/verification/swap/relaunch path.
+- **Progress and failure:** missing acknowledgements time out after 8 s; accepted operations time out
+  after 6 min. The table retains devices during an update and reports success only when a restarted
+  device advertises the requested or newer build. Errors such as a read-only folder are reported remotely.
+  Development builds and headless engines advertise why they cannot self-update.
+- **First rollout:** builds predating remote update support cannot receive these requests. Their rows
+  explain that they need one local update. Incompatible audio announcements are hints only, never an
+  authorization to update; all recent addresses are shown, not just the last mismatching device.
 
 ## Conventions
 
@@ -495,6 +517,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Make recovery and restart checks independent of runner timing" | Replace the remaining cadence-sensitive startup/restart tests with deterministic engine tests, verified by mutations. Record mixer reset/fade spans to distinguish pulses erased by intentional realignment from unexplained loss; no audio/timing behavior changes. Verify injected stalls against observed gaps, and retain diagnostics on CI failures. |
 | "Wait for the joining receiver before measuring synchronized audio" | Fix the final macOS build 15 failure: the test began checking pulses before Bluetooth started playing. Wait for actual synchronized playback, then measure the delay history long enough to cover the maximum group delay. Keep the strict timing, unexplained-loss and audio-coverage assertions. |
 | "Cover microphone refresh retries across polling cycles" | Allow the automatic inventory refresh check to span a missed UDP response and a cached reply. Add controlled failure/recovery coverage proving that new microphones appear on the next refresh while the last good list remains visible. No production polling changes. |
+| "Update other devices from the Overview group" | Add individual and bulk remote updates to the latest release, with builds, progress and errors in Group. Use independently versioned, authenticated management messages on the existing UDP socket so future audio protocol mismatches remain remotely repairable. Require one local update for legacy installations. Verify cross-protocol requests, group authentication, session/request deduplication, timeouts, restart build confirmation and the existing download checks; inspect the controls with silent loopback fixtures. |
 
 ## Open items and known limitations
 

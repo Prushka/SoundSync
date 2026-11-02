@@ -3,6 +3,7 @@
 use soundsync_core::calib::CalibKind;
 use soundsync_core::delay::DelaySetting;
 use soundsync_core::protocol::VolumeChange;
+use soundsync_core::remote_update::{UpdateAction, UpdateState};
 use soundsync_core::{MasterMode, Nanos, NodeId};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,4 +32,8 @@ pub enum Command {
     CancelCalibration,
     /// Refreshes a peer's microphones now (also refreshed automatically by the engine).
     ListInputs(NodeId),
+    /// Publishes the app's updater state to the group; never installs anything by itself.
+    PublishUpdate(UpdateState),
+    /// A user click requesting a check or installation on one other node.
+    RemoteUpdate { node: NodeId, action: UpdateAction },
 }

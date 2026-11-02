@@ -81,6 +81,10 @@ pub struct Status {
     pub output: Option<DeviceStatus>,
     pub delay_ns: Option<Nanos>,
     pub peers: Vec<PeerStatus>,
+    /// Update-capable nodes, even when their audio protocol is incompatible.
+    pub updates: Vec<crate::updates::UpdatePeerStatus>,
+    /// Unreadable audio announcements; these alone never authorize a remote update.
+    pub incompatible_peers: Vec<crate::net::OtherVersion>,
     pub streams: Vec<StreamStatus>,
     pub warnings: Vec<String>,
     /// Information about current conditions that needs no action.
@@ -113,6 +117,8 @@ impl Default for Status {
             output: None,
             delay_ns: None,
             peers: Vec::new(),
+            updates: Vec::new(),
+            incompatible_peers: Vec::new(),
             streams: Vec::new(),
             warnings: Vec::new(),
             notes: Vec::new(),

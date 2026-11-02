@@ -23,6 +23,7 @@ mod node;
 mod power;
 mod synctest;
 mod volume;
+mod updates;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -39,6 +40,7 @@ use soundsync_core::config::Config;
 pub use command::Command;
 pub use net::NetImpair;
 pub use status::{CalibStatus, DeviceStatus, PeerStatus, Status, StreamStatus, VolumeStatus};
+pub use updates::{RemoteUpdateRequest, UpdatePeerStatus};
 
 pub struct EngineOptions {
     pub config: Config,
@@ -62,6 +64,7 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     routes: Sender<net::RxCmd>,
     threads: Vec<JoinHandle<()>>,
+    update_requests: crossbeam_channel::Receiver<RemoteUpdateRequest>,
 }
 
 impl Engine {
@@ -95,6 +98,8 @@ impl Engine {
             counters,
             inputs,
         );
+        let (update_tx, update_requests) = crossbeam_channel::bounded(8);
+        node.updates.requests = Some(update_tx);
         if let (Some(api), Some(state_path)) = (o.default_devices, o.state_path.clone()) {
             // Crash recovery runs on the engine thread (it uses COM; see node::run).
             node.defaults = Some(defaults::DefaultSwitchGuard::new(api, state_path));
@@ -123,7 +128,7 @@ impl Engine {
             .name("soundsync-engine".into())
             .spawn(move || node::run(node, inbound_rx, commands_rx, s))
             .context("spawn engine thread")?;
-        Ok(Engine { commands: commands_tx, status, config_fingerprint, local_addr, stop, routes: routes_tx, threads: vec![rx_thread, engine_thread] })
+        Ok(Engine { commands: commands_tx, status, config_fingerprint, local_addr, stop, routes: routes_tx, threads: vec![rx_thread, engine_thread], update_requests })
     }
 
     pub fn command(&self, c: Command) {
@@ -132,6 +137,11 @@ impl Engine {
 
     pub fn status(&self) -> Arc<Status> {
         self.status.load_full()
+    }
+
+    /// The app drains these even while hidden, using the same updater as its local button.
+    pub fn take_update_request(&self) -> Option<RemoteUpdateRequest> {
+        self.update_requests.try_recv().ok()
     }
 
     /// [`Config::fingerprint`] of the config file as this engine last loaded or wrote it; a

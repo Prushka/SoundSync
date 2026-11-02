@@ -12,6 +12,7 @@ use eframe::egui;
 use soundsync_audio::{AudioHost, DeviceInfo, Direction};
 use soundsync_core::config::{Config, Paths};
 use soundsync_core::delay::DelaySetting;
+use soundsync_core::remote_update::{UpdateAction, UpdateState as GroupUpdateState};
 use soundsync_core::{NodeId, Os};
 use soundsync_engine::{Command, Engine, EngineOptions, Status};
 
@@ -106,6 +107,7 @@ pub struct SoundSyncApp {
     /// The engine's device-change count when the device lists were last refreshed.
     seen_device_events: u64,
     pub updater: Updater,
+    published_update: Option<GroupUpdateState>,
     /// The new build swapped in, and the arguments to start it with once the window has closed.
     relaunch: Option<(Swapped, Vec<OsString>)>,
     /// Dropped before the relaunch, so the new copy becomes the primary instance.
@@ -210,6 +212,7 @@ impl SoundSyncApp {
             last_devices: Instant::now() - Duration::from_secs(60),
             seen_device_events: 0,
             updater,
+            published_update: None,
             relaunch: None,
             instance: Some(app.instance),
         };
@@ -225,6 +228,41 @@ impl SoundSyncApp {
     pub fn command(&self, c: Command) {
         if let Some(e) = &self.engine {
             e.command(c);
+        }
+    }
+
+    /// Checks only the other devices. The controller's own update remains a separate choice.
+    pub fn check_group_updates(&self) {
+        for p in self.status.updates.iter().filter(|p| p.online && !p.pending && p.requested.is_none() && !p.state.busy() && !matches!(p.state, GroupUpdateState::Unavailable(_))) {
+            self.command(Command::RemoteUpdate { node: p.id, action: UpdateAction::Check });
+        }
+    }
+
+    pub fn update_device(&self, node: NodeId, build: u32) {
+        self.command(Command::RemoteUpdate { node, action: UpdateAction::Install { build } });
+    }
+
+    pub fn update_outdated_devices(&self) {
+        for p in &self.status.updates {
+            if let Some(build) = p.installable() {
+                self.update_device(p.id, build);
+            }
+        }
+    }
+
+    fn group_updates_tick(&mut self) {
+        let Some(engine) = &self.engine else { return };
+        while let Some(request) = engine.take_update_request() {
+            tracing::info!("update: {:?} requested by {} ({:016x})", request.action, request.name, request.sender);
+            match request.action {
+                UpdateAction::Check => self.updater.check_now(),
+                UpdateAction::Install { build } => self.updater.install_build(build),
+            }
+        }
+        let state = self.updater.state().for_group();
+        if self.published_update.as_ref() != Some(&state) {
+            engine.command(Command::PublishUpdate(state.clone()));
+            self.published_update = Some(state);
         }
     }
 
@@ -300,6 +338,7 @@ impl SoundSyncApp {
 
     /// (Re)starts the engine with `config`, keeping the command-line engine options.
     fn restart_engine(&mut self, config: Config, done: &str) {
+        self.published_update = None;
         drop(self.engine.take()); // releases the port and audio devices first
         match Engine::start(EngineOptions {
             config: config.clone(),
@@ -378,6 +417,7 @@ impl eframe::App for SoundSyncApp {
             if let Some(e) = &self.engine {
                 self.status = e.status();
             }
+            self.group_updates_tick();
             if let Some(t) = &mut self.tray {
                 t.update(&self.status);
                 t.set_update(self.updater.state().installable().map(|r| r.build));

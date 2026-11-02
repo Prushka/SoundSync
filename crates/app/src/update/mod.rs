@@ -34,6 +34,21 @@ pub enum UpdateState {
 }
 
 impl UpdateState {
+    /// A bounded status for other devices; release URLs and file contents stay in this app.
+    pub fn for_group(&self) -> soundsync_core::remote_update::UpdateState {
+        use soundsync_core::remote_update::{UpdateState as Remote, MAX_TEXT, bounded};
+        match self {
+            Self::Unavailable(reason) => Remote::Unavailable(bounded(reason, MAX_TEXT)),
+            Self::Idle => Remote::Idle,
+            Self::Checking => Remote::Checking,
+            Self::UpToDate { .. } => Remote::UpToDate,
+            Self::Available(r) => Remote::Available { build: r.build },
+            Self::Downloading { release, received, total } => Remote::Downloading { build: release.build, received: (*received).min(*total), total: *total },
+            Self::Ready { release, .. } | Self::Restarting(release) => Remote::Restarting { build: release.build },
+            Self::Failed { error, release } => Remote::Failed { error: bounded(error, MAX_TEXT), build: release.as_ref().map(|r| r.build) },
+        }
+    }
+
     /// The release an install would fetch now.
     pub fn installable(&self) -> Option<&Release> {
         match self {
@@ -50,6 +65,7 @@ impl UpdateState {
 enum Request {
     Check,
     Install,
+    InstallBuild(u32),
 }
 
 /// Checks GitHub on a background thread (after `first_check`, then every `every`, and when
@@ -107,6 +123,13 @@ impl Updater {
         }
     }
 
+    /// A remote click selects an advertised build. Recheck GitHub before installing it.
+    pub fn install_build(&self, build: u32) {
+        if let Some(tx) = &self.requests {
+            let _ = tx.send(Request::InstallBuild(build));
+        }
+    }
+
     /// The staged build, once: the state moves on to `Restarting`.
     pub fn take_ready(&self) -> Option<Staged> {
         let mut state = self.state.lock().unwrap();
@@ -136,6 +159,7 @@ impl Worker {
             match requests.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(Request::Check) => self.check(true),
                 Ok(Request::Install) => self.install(),
+                Ok(Request::InstallBuild(build)) => self.install_latest(build),
                 Err(RecvTimeoutError::Timeout) => {
                     self.check(false);
                     next = Instant::now() + every;
@@ -189,6 +213,24 @@ impl Worker {
                 tracing::warn!("update to {} failed: {error}", release.title);
                 self.set(UpdateState::Failed { error, release: Some(release) });
             }
+        }
+    }
+
+    fn install_latest(&self, build: u32) {
+        if self.state.lock().unwrap().busy() {
+            return;
+        }
+        self.check(true);
+        let state = self.state.lock().unwrap().clone();
+        match state {
+            UpdateState::Available(r) if r.build == build => self.install(),
+            UpdateState::Available(r) => self.set(UpdateState::Failed {
+                error: format!("The latest release changed to build {}; choose Update again to install it.", r.build), release: Some(r),
+            }),
+            UpdateState::UpToDate { .. } => self.set(UpdateState::Failed {
+                error: format!("Build {build} is no longer a newer published release; this device is up to date."), release: None,
+            }),
+            _ => {} // a failed check already explains the failure; never fall back to a cached download
         }
     }
 }
@@ -265,5 +307,35 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(updater.state(), UpdateState::Unavailable("Only SoundSync.app updates itself.".into()));
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_remote_install_rechecks_latest_and_does_not_install_a_changed_release() {
+        let (url, seen) = serve(vec![(200, LATEST.as_bytes().to_vec())]);
+        let updater = start(&url, 6, HOUR);
+        updater.install_build(7);
+        let s = wait_for(&updater, |s| matches!(s, UpdateState::Failed { .. }));
+        assert!(matches!(&s, UpdateState::Failed { error, release: Some(r) } if r.build == 8 && error.contains("changed")), "{s:?}");
+        assert_eq!(*seen.lock().unwrap(), ["/latest"], "only metadata was fetched; no stale build or download supplied by another node");
+    }
+
+    #[test]
+    fn a_remote_install_downloads_through_the_existing_verification_and_staging() {
+        use sha2::{Digest, Sha256};
+        let zip = b"not a valid zip";
+        let (download, downloaded) = serve(vec![(200, zip.to_vec())]);
+        let mut release: serde_json::Value = serde_json::from_str(LATEST).unwrap();
+        for asset in release["assets"].as_array_mut().unwrap() {
+            asset["browser_download_url"] = format!("{download}/update.zip").into();
+            asset["size"] = zip.len().into();
+            let digest: String = Sha256::digest(zip).iter().map(|b| format!("{b:02x}")).collect();
+            asset["digest"] = format!("sha256:{digest}").into();
+        }
+        let (url, _) = serve(vec![(200, serde_json::to_vec(&release).unwrap())]);
+        let updater = start(&url, 7, HOUR);
+        updater.install_build(8);
+        let s = wait_for(&updater, |s| matches!(s, UpdateState::Failed { .. }));
+        assert!(matches!(&s, UpdateState::Failed { error, release: Some(r) } if r.build == 8 && error.contains("zip")), "{s:?}");
+        assert_eq!(*downloaded.lock().unwrap(), ["/update.zip"]);
     }
 }

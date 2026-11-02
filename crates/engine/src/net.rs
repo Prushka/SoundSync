@@ -15,6 +15,7 @@ use crossbeam_channel::{Receiver, Sender};
 use socket2::{Domain, Protocol, Socket, Type};
 use soundsync_audio::AudioHost;
 use soundsync_core::protocol::{Control, DecodeError, GroupKey, MAX_DATAGRAM, Packet, decode, encode};
+use soundsync_core::remote_update::{self, UpdateMessage};
 use soundsync_core::{Nanos, NodeId};
 
 use crate::chunk::AudioChunk;
@@ -71,6 +72,14 @@ impl Transport {
             Err(e) => tracing::warn!("cannot encode control message: {e}"),
         }
     }
+
+    pub fn send_update(&self, to: SocketAddr, session: u64, message: &UpdateMessage) {
+        let mut buf = [0u8; MAX_DATAGRAM];
+        match remote_update::encode(self.node_id(), session, message, &self.key, &mut buf) {
+            Ok(n) => self.send_datagram(to, &buf[..n]),
+            Err(e) => tracing::warn!("cannot encode update message: {e}"),
+        }
+    }
 }
 
 impl PacketSink for Transport {
@@ -81,11 +90,9 @@ impl PacketSink for Transport {
     }
 }
 
-pub struct Inbound {
-    pub from: SocketAddr,
-    pub sender: NodeId,
-    pub arrival_ns: Nanos,
-    pub control: Control,
+pub enum Inbound {
+    Control { from: SocketAddr, sender: NodeId, arrival_ns: Nanos, control: Control },
+    Update { from: SocketAddr, sender: NodeId, session: u64, arrival_ns: Nanos, message: UpdateMessage },
 }
 
 pub enum RxCmd {
@@ -102,8 +109,8 @@ pub struct RxCounters {
     pub unrouted_audio: AtomicU64,
     /// Last time (host clock) any authenticated packet arrived.
     pub last_authenticated_ns: std::sync::atomic::AtomicI64,
-    /// The last datagram from a SoundSync speaking another protocol version.
-    pub other_version: std::sync::Mutex<Option<OtherVersion>>,
+    /// Recent incompatible nodes, including ones too old to support remote updates.
+    pub other_versions: std::sync::Mutex<HashMap<SocketAddr, OtherVersion>>,
 }
 
 impl RxCounters {
@@ -111,7 +118,7 @@ impl RxCounters {
     /// (unreadable, but it got past the firewall all the same).
     pub fn last_heard_ns(&self) -> Option<Nanos> {
         let authenticated = Some(self.last_authenticated_ns.load(Ordering::Relaxed)).filter(|t| *t != 0);
-        let other = self.other_version.lock().unwrap().map(|o| o.at_ns);
+        let other = self.other_versions.lock().unwrap().values().map(|o| o.at_ns).max();
         authenticated.max(other)
     }
 }
@@ -119,7 +126,7 @@ impl RxCounters {
 /// A SoundSync datagram this version cannot read (unauthenticated: only a hint for the user).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OtherVersion {
-    pub from: std::net::IpAddr,
+    pub from: SocketAddr,
     pub version: u8,
     pub at_ns: Nanos,
 }
@@ -168,12 +175,26 @@ struct Rx {
 
 impl Rx {
     fn deliver(&mut self, buf: &[u8], from: SocketAddr, arrival_ns: Nanos) {
+        if buf.starts_with(&remote_update::MAGIC) {
+            match remote_update::decode(buf, &self.transport.key) {
+                Ok((sender, session, message)) => {
+                    self.counters.last_authenticated_ns.store(arrival_ns, Ordering::Relaxed);
+                    let _ = self.ctrl.send(Inbound::Update { from, sender, session, arrival_ns, message });
+                }
+                Err(_) => { self.counters.bad_packets.fetch_add(1, Ordering::Relaxed); }
+            }
+            return;
+        }
         let (sender, packet) = match decode(buf, &self.transport.key) {
             Ok(v) => v,
             Err(e) => {
                 self.counters.bad_packets.fetch_add(1, Ordering::Relaxed);
                 if let DecodeError::BadVersion(version) = e {
-                    *self.counters.other_version.lock().unwrap() = Some(OtherVersion { from: from.ip(), version, at_ns: arrival_ns });
+                    let mut other = self.counters.other_versions.lock().unwrap();
+                    other.retain(|_, o| arrival_ns.saturating_sub(o.at_ns) < 10_000_000_000);
+                    if other.len() < 64 || other.contains_key(&from) {
+                        other.insert(from, OtherVersion { from, version, at_ns: arrival_ns });
+                    }
                 }
                 return;
             }
@@ -181,7 +202,7 @@ impl Rx {
         self.counters.last_authenticated_ns.store(arrival_ns, Ordering::Relaxed);
         let chunk = match packet {
             Packet::Control(control) => {
-                let _ = self.ctrl.send(Inbound { from, sender, arrival_ns, control });
+                let _ = self.ctrl.send(Inbound::Control { from, sender, arrival_ns, control });
                 return;
             }
             Packet::Audio { header, payload } => AudioChunk::from_payload(header, payload, arrival_ns),
@@ -290,7 +311,8 @@ mod tests {
         // the firewall (blaming the firewall for a version mismatch would send people astray).
         let c = RxCounters::default();
         assert_eq!(c.last_heard_ns(), None);
-        *c.other_version.lock().unwrap() = Some(OtherVersion { from: [192, 168, 1, 157].into(), version: 1, at_ns: 5_000 });
+        let from = "192.168.1.157:47810".parse().unwrap();
+        c.other_versions.lock().unwrap().insert(from, OtherVersion { from, version: 1, at_ns: 5_000 });
         assert_eq!(c.last_heard_ns(), Some(5_000));
         c.last_authenticated_ns.store(7_000, Ordering::Relaxed);
         assert_eq!(c.last_heard_ns(), Some(7_000));

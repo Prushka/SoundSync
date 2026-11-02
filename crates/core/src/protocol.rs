@@ -50,7 +50,7 @@ impl GroupKey {
         GroupKey(h.finalize().into())
     }
 
-    fn mac(&self) -> HmacSha256 {
+    pub(crate) fn mac(&self) -> HmacSha256 {
         <HmacSha256 as KeyInit>::new_from_slice(&self.0).expect("HMAC accepts any key length")
     }
 }

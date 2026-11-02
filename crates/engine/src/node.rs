@@ -42,6 +42,7 @@ pub(crate) struct Node {
     pub node_id: Arc<AtomicU64>,
     pub session: u64,
     pub peers: PeerTable,
+    pub updates: crate::updates::Updates,
     pub status: Arc<ArcSwap<Status>>,
     pub routes: Sender<RxCmd>,
     pub media: Media,
@@ -117,6 +118,7 @@ impl Node {
             node_id,
             session: rand::random(),
             peers: PeerTable::default(),
+            updates: crate::updates::Updates::default(),
             status,
             routes,
             counters,
@@ -248,7 +250,15 @@ impl Node {
     }
 
     pub(crate) fn handle_inbound(&mut self, m: Inbound) {
-        let Inbound { from, sender, arrival_ns, control } = m;
+        let (from, sender, arrival_ns, control) = match m {
+            Inbound::Control { from, sender, arrival_ns, control } => (from, sender, arrival_ns, control),
+            Inbound::Update { from, sender, session, arrival_ns, message } => {
+                if sender != self.id() && crate::discovery::hello_allowed(from.ip(), &self.local_nets, &self.static_ips) {
+                    self.updates.receive(&self.transport, self.session, &self.config.node.name, from, sender, session, message, arrival_ns);
+                }
+                return;
+            }
+        };
         if let Control::Hello(h) = control {
             self.on_hello(from, sender, h, arrival_ns);
             return;
@@ -305,11 +315,17 @@ impl Node {
     }
 
     pub(crate) fn handle_command(&mut self, c: Command) {
+        // Progress updates are frequent; keep them out of the command log.
+        if let Command::PublishUpdate(state) = c {
+            self.updates.publish(state);
+            return;
+        }
         tracing::info!("command {c:?}");
         if self.handle_media_command(&c) {
             return;
         }
         match c {
+            Command::RemoteUpdate { node, action } => self.updates.request(&self.transport, self.session, node, action, self.host.now_ns()),
             Command::SyncTest(on) => self.sync_test_command(on),
             Command::StartCalibration { mic_node, mic_device, kind, check } => {
                 self.calib.stale_apply = false;
@@ -366,11 +382,9 @@ impl Node {
         if self.calib.stale_apply {
             w.push("Calibration result changed before Apply. Review the current result and apply again.".into());
         }
-        if let Some(o) = *self.counters.other_version.lock().unwrap()
-            && now - o.at_ns < OTHER_VERSION_WARNING_NS
-        {
+        for o in self.counters.other_versions.lock().unwrap().values().filter(|o| now - o.at_ns < OTHER_VERSION_WARNING_NS) {
             let which = if o.version < PROTOCOL_VERSION { "an older" } else { "a newer" };
-            w.push(format!("The SoundSync at {} runs a different version ({which} one) — install the same version on every device", o.from));
+            w.push(format!("The SoundSync at {} runs a different version ({which} one) — see Overview > Group to update devices", o.from.ip()));
         }
         if !self.inbound_ok {
             w.push(if cfg!(target_os = "macos") {
@@ -408,6 +422,11 @@ impl Node {
         let now = self.host.now_ns();
         self.check_resume(now);
         self.poll_discovery(now);
+        let mut update_targets = self.hello_targets.clone();
+        update_targets.extend(self.peers.iter().map(|p| p.addr));
+        update_targets.extend(self.counters.other_versions.lock().unwrap().values()
+            .filter(|o| now - o.at_ns < OTHER_VERSION_WARNING_NS && crate::discovery::hello_allowed(o.from.ip(), &self.local_nets, &self.static_ips)).map(|o| o.from));
+        self.updates.tick(&self.transport, self.session, &self.config.node.name, &update_targets, now);
         for target in self.hello_targets.clone() {
             if !self.peers.has_addr(target) {
                 self.say_hello(target, now);
@@ -452,12 +471,16 @@ impl Node {
     }
 
     pub(crate) fn base_status(&self, now: Nanos) -> Status {
+        // Drop this guard before condition_warnings reads the same counters.
+        let incompatible_peers = self.counters.other_versions.lock().unwrap().values().filter(|o| now - o.at_ns < OTHER_VERSION_WARNING_NS).copied().collect();
         Status {
             node_id: self.id(),
             name: self.config.node.name.clone(),
             group: self.config.network.group.clone(),
             os: Os::current(),
             master_mode: self.config.master.mode,
+            updates: self.updates.status(now),
+            incompatible_peers,
             peers: self
                 .peers
                 .iter()
