@@ -18,7 +18,7 @@ fn a_recorded_device_gap_excuses_only_the_pulse_it_erased() {
 }
 
 #[test]
-#[should_panic(expected = "pulses missing outside device gaps")]
+#[should_panic(expected = "pulses missing outside output interruptions")]
 fn an_unrelated_gap_does_not_hide_a_lost_packet() {
     let pulses = pulses();
     let onsets: Vec<_> = pulses.iter().skip(1).map(|p| p + 50 * MS).collect();

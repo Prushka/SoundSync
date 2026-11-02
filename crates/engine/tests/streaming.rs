@@ -72,74 +72,6 @@ fn stream_start_delay_covers_known_receivers() {
     m.shutdown();
 }
 
-/// Whether this machine's timers fire on time. Tests that compare exact group delays need it:
-/// the very first stream's delay is estimated assuming the master captures on the usual ~10 ms
-/// cadence, and measured requirements stay steady. Where timers oversleep (GitHub's macOS runners,
-/// SS_FAKE_MIN_SLEEP_MS) capture arrives late, the first stream legitimately needs one delay
-/// increase, and requirements drift a step or two at any moment.
-fn timers_are_punctual() -> bool {
-    if std::env::var_os("SS_FAKE_MIN_SLEEP_MS").is_some() {
-        return false;
-    }
-    let t = std::time::Instant::now();
-    for _ in 0..10 {
-        sleep(Duration::from_millis(2));
-    }
-    t.elapsed() < Duration::from_millis(60)
-}
-
-#[test]
-fn first_stream_starts_with_the_delay_the_receivers_need() {
-    // Before a receiver has played anything it can only estimate its requirement; the estimate
-    // must not undershoot what it then measures, or the very first broadcast starts behind.
-    if !timers_are_punctual() {
-        eprintln!("skipped: this machine's timers oversleep, so capture cadence differs from the estimate's assumption");
-        return;
-    }
-    let m = virtual_master("m", "TV");
-    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", 0.0, 40, None);
-    assert!(wait_until(Duration::from_secs(5), || m.engine.status().peers.iter().any(|p| p.output.is_some())));
-    sleep(Duration::from_millis(1500)); // r1's state with its output reached the master
-    m.engine.command(Command::SetBroadcast(true));
-    assert!(wait_until(Duration::from_secs(1), || m.engine.status().delay_ns.is_some()));
-    let first = m.engine.status().delay_ns.unwrap();
-    sleep(Duration::from_secs(4));
-    let later = m.engine.status().delay_ns.unwrap();
-    assert_eq!(later, first, "the group delay had to grow from {} ms to {} ms after the start", first / MS, later / MS);
-    r1.shutdown();
-    m.shutdown();
-}
-
-#[test]
-fn restarted_stream_starts_with_the_delay_the_receivers_needed() {
-    // Between streams a receiver has nothing to measure; it must keep reporting what it
-    // measured, or a restarted broadcast begins with a too-small delay and plays behind.
-    if !timers_are_punctual() {
-        // Late timers make requirements drift a step or two at any moment (seen on GitHub's macOS
-        // runner: the receiver's requirement rose after "settled" was read), so exact delays
-        // before and after the restart cannot be compared there.
-        eprintln!("skipped: this machine's timers oversleep, so requirements drift between the readings");
-        return;
-    }
-    let m = virtual_master("m", "TV");
-    let r1 = receiver("r1", FakeClock::default(), &m, "Laptop", 0.0, 40, None);
-    m.engine.command(Command::SetBroadcast(true));
-    sleep(Duration::from_secs(4));
-    let settled = m.engine.status().delay_ns.unwrap();
-    m.engine.command(Command::SetBroadcast(false));
-    assert!(wait_until(Duration::from_secs(3), || r1.engine.status().streams.is_empty()));
-    sleep(Duration::from_millis(1500)); // r1's next STATE goes out without a stream
-    m.engine.command(Command::SetBroadcast(true));
-    assert!(wait_until(Duration::from_secs(1), || m.engine.status().delay_ns.is_some()));
-    let first = m.engine.status().delay_ns.unwrap();
-    assert!(first <= settled, "a restart never needs more than the last stream: {} vs {} ms", first / MS, settled / MS);
-    sleep(Duration::from_secs(3));
-    let later = m.engine.status().delay_ns.unwrap();
-    assert_eq!(later, first, "the restarted stream's delay had to grow from {} ms to {} ms", first / MS, later / MS);
-    r1.shutdown();
-    m.shutdown();
-}
-
 #[test]
 fn receivers_start_playing_promptly() {
     // A new stream is announced and subscribed to at once, not on the next 1 s gossip round.
@@ -188,15 +120,16 @@ fn sync_recovers_after_a_simulated_output_stall() {
     m.engine.command(Command::SetDelay(soundsync_core::delay::DelaySetting::Manual(250.0)));
     m.engine.command(Command::SetBroadcast(true));
     sleep(Duration::from_secs(3));
-    let from = now();
-    let next = m.host.source_pulses("CABLE Input").last().copied().unwrap() + 200 * MS + 250 * MS;
-    // Leave room for the fake device's extra buffering on coarse timers, then stall across
-    // this pulse well after warm-up. Subsequent pulses must recover within the usual 1 ms.
-    assert!(wait_until(Duration::from_secs(1), || now() >= next - 120 * MS));
+    let from = now() - 500 * MS;
+    let prior_gaps = r.host.output_gaps("Laptop").len();
+    // Longer than the 200 ms pulse cadence: the observed gap must erase a pulse regardless
+    // of how late the test thread or device wakes. Subsequent pulses must recover within 1 ms.
     r.host.stall_output("Laptop", Duration::from_millis(300));
     sleep(Duration::from_secs(3));
     let gaps = r.host.output_gaps("Laptop");
-    assert!(gaps.iter().any(|gap| gap.contains(&next)), "the planned pulse must fall in the gap: {gaps:?}");
+    let pulses = m.host.source_pulses("CABLE Input");
+    assert!(gaps.iter().skip(prior_gaps).any(|gap| pulses.iter().any(|p| gap.contains(&(p + 250 * MS)))),
+        "the injected stall must erase a pulse: {gaps:?}");
     assert_in_sync(&m, "CABLE Input", &[(&r, "Laptop", 0)], &[250 * MS], from, now() - 350 * MS, MS, false);
     r.shutdown();
     m.shutdown();

@@ -178,7 +178,8 @@ fn nearest_deviation(onsets: &[Nanos], p: Nanos, delays: &[Nanos], extra: Nanos)
 /// output within `tol` of `capture + d + extra` for one of the group delays `delays` in effect
 /// (outputs: node, device, expected extra delay). With `allow_missing`, up to 20% of pulses may
 /// be absent (lossy network: a pulse lives in a single packet). A pulse inside an exact recorded
-/// fake-device gap cannot play; still require at least 80% of all pulses, and at least five.
+/// fake-device gap or mixer reset/fade can disappear; still require at least 80% of all pulses,
+/// and at least five. Detected pulses must meet the timing tolerance even during a transition.
 #[allow(clippy::too_many_arguments)] // test assertion helper: every argument is part of the check
 pub fn assert_in_sync(master: &TestNode, source: &str, outputs: &[(&TestNode, &str, Nanos)], delays: &[Nanos], from: Nanos, to: Nanos, tol: Nanos, allow_missing: bool) {
     assert!(!delays.is_empty(), "no group delay");
@@ -192,30 +193,38 @@ pub fn assert_in_sync(master: &TestNode, source: &str, outputs: &[(&TestNode, &s
             eprintln!("DBG {device}: D={delays_ms:?} ms, deviations (us) {devs:?}");
             eprintln!("DBG {device}: streams {:?}", node.engine.status().streams);
             eprintln!("DBG {device}: pulses {pulses:?}, underruns {:?}", node.host.underruns(device));
+            eprintln!("DBG {device}: timing transitions {:?}", node.host.output_transitions(device));
         }
     }
     for (node, device, extra) in outputs {
-        assert_pulses_on_time(device, &pulses, &node.host.onsets(device), delays, *extra, &node.host.output_gaps(device), tol, allow_missing);
+        let mut interruptions = node.host.output_gaps(device);
+        interruptions.extend(node.host.output_transitions(device));
+        assert_pulses_on_time(device, &pulses, &node.host.onsets(device), delays, *extra, &interruptions, tol, allow_missing);
     }
 }
 
 /// Checks recorded emissions independently of the live nodes, including the negative cases in
-/// sync_assertions.rs. Only a measured output gap can excuse a missing pulse on a lossless link.
+/// sync_assertions.rs. Only a measured output interruption can excuse a missing pulse on a lossless link.
 #[allow(clippy::too_many_arguments)]
-pub fn assert_pulses_on_time(device: &str, pulses: &[Nanos], onsets: &[Nanos], delays: &[Nanos], extra: Nanos, gaps: &[std::ops::Range<Nanos>], tol: Nanos, allow_missing: bool) {
+pub fn assert_pulses_on_time(device: &str, pulses: &[Nanos], onsets: &[Nanos], delays: &[Nanos], extra: Nanos, interruptions: &[std::ops::Range<Nanos>], tol: Nanos, allow_missing: bool) {
     let (mut matched, mut interrupted, mut missing) = (0, 0, 0);
+    let mut unexplained = Vec::new();
     for p in pulses {
         match nearest_deviation(onsets, *p, delays, extra) {
             Some(dev) if dev.abs() < 30 * MS => {
                 assert!(dev.abs() < tol, "{device}: pulse captured at {p} played {} us off (delays {delays:?} ns)", dev / 1000);
                 matched += 1;
             }
-            _ if delays.iter().any(|d| gaps.iter().any(|gap| gap.contains(&(p + d + extra)))) => interrupted += 1,
-            _ => missing += 1,
+            _ if delays.iter().any(|d| interruptions.iter().any(|span| span.contains(&(p + d + extra)))) => interrupted += 1,
+            other => {
+                missing += 1;
+                unexplained.push((*p, other));
+            }
         }
     }
     let max_missing = if allow_missing { pulses.len() / 5 } else { 0 };
-    assert!(missing <= max_missing, "{device}: {missing} of {} pulses missing outside device gaps {gaps:?}", pulses.len());
+    assert!(missing <= max_missing,
+        "{device}: {missing} of {} pulses missing outside output interruptions {interruptions:?}; capture/deviation {unexplained:?}, delays {delays:?}, onsets {onsets:?}", pulses.len());
     assert!(matched >= 5 && matched * 5 >= pulses.len() * 4,
-        "{device}: only {matched} of {} pulses verified; {interrupted} fell in device gaps, {missing} were lost", pulses.len());
+        "{device}: only {matched} of {} pulses verified; {interrupted} fell in output interruptions, {missing} were lost", pulses.len());
 }

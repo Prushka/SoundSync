@@ -276,8 +276,9 @@ Paths:
   - Engine tests use `spawn_with(Spec{..}, configure, setup)`, `wait_until` and `FakeHost`. The fake host
     provides: `FakeRoom`, `add_mic`, `make_sleepy`, `set_default_render`, device volumes with a dB curve
     where 50% is −10.5 dB, `set_active_sessions`, and `underruns` (when a stalled output lost audio).
-  - Timing tests accept any group delay in effect during the window (`DelayLog`). A test that needs punctual
-    timers is skipped when `timers_are_punctual()` is false. Calibration tests check each sweep's quality
+  - Timing tests accept any group delay in effect during the window (`DelayLog`). Exact startup and
+    restart checks drive engine media ticks with fixed measurements, without relying on timer cadence.
+    Calibration tests check each sweep's quality
     only when no speaker underran during the run (`speakers_underran_since`).
 - **Commits:** an imperative summary line, then a short body of bullets. End the message with the
   `Co-Authored-By:` trailer the system specifies. Commit to `main`, and **never push**.
@@ -300,10 +301,12 @@ Paths:
   3-vCPU CI runner, running tests in parallel made the group delay step up after warm-up or lost a click.
   Pinned to one core, parallel runs failed 5 of 5 and serial runs passed 3 of 3. That is why CI runs one
   test at a time. To reproduce a small runner here, use `run-pinned.ps1` (below).
-- **The macOS runner's timers oversleep even with tests run one at a time.** `timers_are_punctual()` is
-  false there, and measured requirements drift a 5 ms step at any moment. So tests skip their
-  exact group-delay comparisons there:
-  - `first_stream_…` and `restarted_stream_…` skip entirely.
+- **Runner timers can oversleep even with tests run one at a time.** Measured requirements
+  can grow a 5 ms step at any moment, on Windows as well as macOS. A short timer probe
+  cannot establish that requirements will stay fixed:
+  - Initial delay and restart retention are checked in `streams::tests` with controlled measurements.
+    These tests run on every platform and detect omission of unsubscribed receivers or loss of the
+    last measured requirement. They also verify a legitimate later 85 → 90 ms increase.
   - `virtual_mode_three_outputs_in_sync` checks that auto delay never shrinks and every speaker
     stays in sync against the delay history. A short timer probe after the run cannot establish
     that earlier capture/device scheduling was punctual (Windows build 13 grew from 85 to 90 ms).
@@ -315,9 +318,14 @@ Paths:
   - Startup measures the first emitted audio, including when the player reports `Behind`. Waiting
     for `Playing` also waits for the next group-delay update and mislabels that as slow subscription.
   - Streaming checks account for a missing pulse only when its expected emission falls inside an
-    exact `FakeHost::output_gaps` interval. Timing errors and unexplained loss still fail; at least
-    80% of the pulses (and at least five) must play. A controlled output stall verifies recovery,
-    and assertion regressions reject unrelated gaps, timing errors and insufficient audio.
+    exact fake-device gap or mixer-reported reset/fade interval. A one-frame pulse can disappear
+    in an intentional fade even with zero lost frames (reproduced with 40 ms timers).
+    `RenderCallback::timing_transition_frames` is read-only diagnostic information; the mixer still
+    renders the same samples and makes the same timing decisions. The fake host maps these spans
+    to true emission time, including device latency and rate. Detected timing errors and unexplained
+    loss still fail; at least 80% of the pulses (and at least five) must play. A controlled output stall
+    verifies recovery against the gap that actually occurred, without assuming a wake-up deadline.
+    Assertion regressions reject unrelated gaps, timing errors and insufficient audio.
   - The stalled microphone-inventory test holds its probe with an explicit gate. Commands still
     have a 1 s deadline; establishing both new clock maps may take longer on a loaded runner,
     and must complete while enumeration is still blocked. The probe lasts at least 2.25 s.
@@ -479,6 +487,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Track delay changes throughout the slow-receiver CI test" | Fix the remaining macOS build 10 failure by measuring the group-delay history instead of assuming it stays fixed after settling. Reproduced with a late 10 ms step; keep the 1 ms sync tolerance and the delay-increase assertion. |
 | "Fix CI timing assertions for audio and microphone discovery" | Fix build 12's macOS streaming assertions: measure first emitted audio instead of the later `Playing` state, and identify pulses erased by exact fake-output gaps. Add a controlled stall and negative assertion regressions; retain the 600 ms startup bound, 1 ms sync tolerance and minimum audio coverage. Hold the inventory probe explicitly while clock discovery completes. No production syncing changes. |
 | "Check auto-delay monotonicity across runner scheduling changes" | Fix the Windows build 13 assertion that presumed fixed requirements after warm-up based on a later timer probe. Allow legitimate increases, reject decreases, and retain the 1 ms checks on all three speakers against the delay history. Fixed-requirement stability remains covered by deterministic `DelayPolicy` tests. |
+| "Make recovery and restart checks independent of runner timing" | Replace the remaining cadence-sensitive startup/restart tests with deterministic engine tests, verified by mutations. Record mixer reset/fade spans to distinguish pulses erased by intentional realignment from unexplained loss; no audio/timing behavior changes. Verify injected stalls against observed gaps, and retain diagnostics on CI failures. |
 
 ## Open items and known limitations
 

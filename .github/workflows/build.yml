@@ -42,6 +42,8 @@ jobs:
           # in parallel on a runner's 3-4 cores they starve each other's audio threads (pinned to
           # one core, parallel runs failed 5 of 5, one at a time passed 3 of 3).
           RUST_TEST_THREADS: 1
+          # Rust prints captured diagnostics only for failed tests.
+          SS_DEBUG: 1
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

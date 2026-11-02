@@ -42,6 +42,9 @@ pub struct DeviceInfo {
 /// Fills the output buffer (interleaved f32 in `format`) for one device period.
 pub trait RenderCallback: Send + 'static {
     fn render(&mut self, out: &mut [f32], format: StreamFormat, timing: RenderTiming);
+    /// Diagnostic span from the start of the last buffer affected by an intentional timing
+    /// reset, including its fades. Simulated devices record it; hardware backends ignore it.
+    fn timing_transition_frames(&self) -> usize { 0 }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

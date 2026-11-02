@@ -820,3 +820,107 @@ impl Node {
             .collect();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use std::sync::atomic::AtomicU64;
+    use soundsync_audio::fake::{FakeClock, FakeHost};
+    use soundsync_audio::StreamHandle;
+    use soundsync_core::config::Config;
+    use soundsync_core::protocol::{GroupKey, Hello};
+    use crate::inputs::InputInventory;
+    use crate::net::{RxCounters, Transport};
+
+    const MS: Nanos = 1_000_000;
+
+    // The test drives media ticks and advertised measurements directly. No capture or render
+    // thread can change the requirements between the first-delay and later-delay assertions.
+    struct IdleCapture;
+    impl StreamHandle for IdleCapture {
+        fn format(&self) -> StreamFormat { DEFAULT_FORMAT }
+        fn latency_ns(&self) -> Nanos { 0 }
+        fn is_alive(&self) -> bool { true }
+    }
+
+    fn node(id: NodeId) -> Node {
+        let mut config = Config::default();
+        config.node.id = id;
+        config.network.group = "test".into();
+        let host = FakeHost::new(FakeClock::default());
+        let node_id = Arc::new(AtomicU64::new(id));
+        let transport = Transport::bind(Ipv4Addr::LOCALHOST, 0, GroupKey::derive("test", ""), node_id.clone(), None).unwrap();
+        let (routes, _) = crossbeam_channel::unbounded();
+        let inputs = InputInventory::spawn(host.clone()).unwrap();
+        Node::new(config, None, host, transport, node_id, Arc::new(ArcSwap::from_pointee(Status::default())), routes, Arc::new(RxCounters::default()), inputs)
+    }
+
+    fn advertise(master: &mut Node, receiver: &Node) {
+        let hello = Hello {
+            reply: false, name: "receiver".into(), os: Os::current(), app_version: "test".into(),
+            group: "test".into(), session: receiver.session,
+        };
+        master.peers.upsert_hello(receiver.id(), receiver.transport.local_addr(), &hello, 0);
+        master.peers.get_mut(receiver.id()).unwrap().state = Some(receiver.node_state());
+    }
+
+    fn start_capture(master: &mut Node) {
+        master.media.capture = Some(CaptureState {
+            stream: Box::new(IdleCapture), selector: DeviceSelector::Default, id: "cable".into(), device: "cable".into(),
+            mode: MasterMode::Virtual, shared: Arc::new(SenderShared::new()), leases: Leases::new(LEASE_TTL_NS), probe_ns: 0, local_updates: None,
+        });
+        master.update_presentation_offset(true);
+    }
+
+    fn measured_slot(node: &mut Node, required: Nanos) {
+        let stats = Arc::new(SlotStats::default());
+        stats.required_ns.store(required, Ordering::Relaxed);
+        node.media.slots.push(SlotHandle {
+            master: node.id(), stream_id: 1, format: DEFAULT_FORMAT, stats,
+            clock: Arc::new(ArcSwap::from_pointee(ClockMap::IDENTITY)), local: true, layout: MapKind::Identity,
+        });
+        node.media_tick(0);
+    }
+
+    #[test]
+    fn first_stream_covers_the_unmeasured_receiver_requirement() {
+        let mut master = node(1);
+        let mut receiver = node(2);
+        receiver.media.mixer.lead_ns.store(45 * MS, Ordering::Relaxed);
+        receiver.media.mixer.period_ns.store(15 * MS, Ordering::Relaxed);
+        assert_eq!(receiver.required_delay(), 80 * MS, "device lead, period and capture/network headroom");
+        advertise(&mut master, &receiver);
+        start_capture(&mut master);
+        assert_eq!(master.presentation_offset(), Some(85 * MS), "the first packet must cover the receiver before it subscribes");
+
+        // The measured path needs 78 ms plus the 2 ms guard. Its estimate already covered it.
+        measured_slot(&mut receiver, 78 * MS);
+        advertise(&mut master, &receiver);
+        master.update_presentation_offset(false);
+        assert_eq!(master.presentation_offset(), Some(85 * MS), "unchanged requirements must not raise the delay");
+    }
+
+    #[test]
+    fn restart_uses_the_requirement_retained_between_streams() {
+        let mut master = node(1);
+        let mut receiver = node(2);
+        measured_slot(&mut receiver, 78 * MS);
+        advertise(&mut master, &receiver);
+        start_capture(&mut master);
+        assert_eq!(master.presentation_offset(), Some(85 * MS));
+
+        master.media.capture = None;
+        receiver.drop_all_slots();
+        assert_eq!(receiver.node_state().required_delay_ns, 80 * MS, "idle gossip must retain the last measurement");
+        advertise(&mut master, &receiver);
+        start_capture(&mut master);
+        assert_eq!(master.presentation_offset(), Some(85 * MS), "restart must use the retained requirement");
+
+        // Unlike the old wall-clock assertion, a new measurement is allowed to raise D.
+        measured_slot(&mut receiver, 83 * MS);
+        advertise(&mut master, &receiver);
+        master.update_presentation_offset(false);
+        assert_eq!(master.presentation_offset(), Some(90 * MS));
+    }
+}

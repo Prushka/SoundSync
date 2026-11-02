@@ -161,6 +161,7 @@ pub struct Mixer {
     /// Largest device lead in the current and previous ~1 s window (the lead swings by up to a
     /// period as the device buffer drains and refills; requirements must cover the worst).
     lead_window: (Nanos, Nanos, Nanos), // (window start, max this window, max previous window)
+    timing_transition_frames: usize,
 }
 
 const MAX_SLOTS: usize = 32;
@@ -194,6 +195,7 @@ impl Mixer {
             signals: Vec::with_capacity(MAX_SIGNALS),
             limiter: SoftLimiter::new(out.sample_rate),
             lead_window: (0, 0, 0),
+            timing_transition_frames: 0,
         }
     }
 
@@ -256,8 +258,16 @@ impl Mixer {
             };
             slot.stats.master_volume_bits.store(master_gain.to_bits(), Ordering::Relaxed);
             let gain = if paused { 0.0 } else { slot.gain * master_gain };
+            let previous_realigns = slot.player.stats().realigns;
             let report = slot.player.render_add(out, t, &clock, extra, gain);
             let stats = slot.player.stats();
+            if stats.realigns != previous_realigns {
+                // A hard realign fades this buffer out and the next aligned buffer in; reducing
+                // Behind only fades in. This reports the existing transition without changing it.
+                let fade = soundsync_core::player::PlayerConfig::for_output(self.out).fade_frames;
+                let affected = if report.realigned { out.len() / self.out.channels as usize + fade } else { fade };
+                self.timing_transition_frames = self.timing_transition_frames.max(affected);
+            }
             let s = &slot.stats;
             s.error_ns.store(report.error_ns, Ordering::Relaxed);
             s.behind_ns.store(stats.behind_ns, Ordering::Relaxed);
@@ -311,6 +321,7 @@ impl Mixer {
 
 impl RenderCallback for Mixer {
     fn render(&mut self, out: &mut [f32], _format: StreamFormat, t: RenderTiming) {
+        self.timing_transition_frames = 0;
         self.apply_commands();
         let lead = t.dac_time_ns - t.now_ns;
         let (start, cur, prev) = &mut self.lead_window;
@@ -336,6 +347,8 @@ impl RenderCallback for Mixer {
         }
         self.limiter.process(out, self.out.channels as usize);
     }
+
+    fn timing_transition_frames(&self) -> usize { self.timing_transition_frames }
 }
 
 #[cfg(test)]
@@ -450,6 +463,19 @@ mod tests {
         fn render_secs(&mut self, secs: f64) -> Vec<(Vec<f32>, Nanos)> {
             (0..(secs * 100.0) as usize).map(|_| self.render()).collect()
         }
+    }
+
+    #[test]
+    fn timing_transition_diagnostics_clear_after_the_realign_buffer() {
+        let mut h = Harness::new();
+        h.add(7, |_| 0.3);
+        h.render_secs(0.5);
+        assert_eq!(h.mixer.timing_transition_frames(), 0);
+        h.shared.extra_latency_ns.store(-50_000_000, Ordering::Relaxed);
+        h.render();
+        assert_eq!(h.mixer.timing_transition_frames(), PERIOD + PlayerConfig::for_output(stereo()).fade_frames);
+        h.render();
+        assert_eq!(h.mixer.timing_transition_frames(), 0, "ordinary buffers must not be marked as transitions");
     }
 
     fn last_value(r: &[(Vec<f32>, Nanos)]) -> f32 {

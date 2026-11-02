@@ -136,6 +136,7 @@ struct Inner {
     pulses: HashMap<String, Vec<Nanos>>,
     underruns: HashMap<String, Vec<Nanos>>,
     output_gaps: HashMap<String, Vec<std::ops::Range<Nanos>>>,
+    output_transitions: HashMap<String, Vec<std::ops::Range<Nanos>>>,
     output_stalls: HashMap<String, Duration>,
     sessions: HashMap<String, usize>,
     room: Option<Arc<FakeRoom>>,
@@ -334,6 +335,11 @@ impl FakeHost {
         self.inner.lock().unwrap().output_gaps.get(device).cloned().unwrap_or_default()
     }
 
+    /// Emission intervals affected by the callback's intentional timing resets and fades.
+    pub fn output_transitions(&self, device: &str) -> Vec<std::ops::Range<Nanos>> {
+        self.inner.lock().unwrap().output_transitions.get(device).cloned().unwrap_or_default()
+    }
+
     /// Stalls this output's thread once, to exercise recovery from a missed device callback.
     pub fn stall_output(&self, device: &str, duration: Duration) {
         self.inner.lock().unwrap().output_stalls.insert(device.to_string(), duration);
@@ -431,6 +437,12 @@ fn run_output(spec: FakeOutputSpec, time: TimeMap, inner: Arc<Mutex<Inner>>, mut
             out.fill(0.0);
             let dac = time.host(frame_true(written).round() as Nanos) + spec.reported_latency_ns;
             cb.render(out, fmt, RenderTiming { now_ns: time.host(now), dac_time_ns: dac });
+            let transition = cb.timing_transition_frames();
+            if transition > 0 {
+                let shift = (spec.reported_latency_ns + spec.hidden_latency_ns) as f64;
+                let affected = (frame_true(written) + shift).round() as Nanos..(frame_true(written + transition as i64) + shift).round() as Nanos;
+                inner.lock().unwrap().output_transitions.entry(spec.name.clone()).or_default().push(affected);
+            }
             let gain = device_gain(&inner, &spec.name); // the device's own volume, as Windows applies it
             if gain != 1.0 {
                 out.iter_mut().for_each(|x| *x *= gain);
