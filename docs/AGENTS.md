@@ -331,6 +331,9 @@ Paths:
   - The stalled microphone-inventory test holds its probe with an explicit gate. Commands still
     have a 1 s deadline; establishing both new clock maps may take longer on a loaded runner,
     and must complete while enumeration is still blocked. The probe lasts at least 2.25 s.
+  - Microphone refresh tests allow two 5 s UDP polling cycles plus cache/status delivery. A
+    controlled failed refresh checks that the last list stays visible and the next poll discovers
+    the new microphone; the production polling cadence is unchanged.
 
   To see what a delay decision was based on, temporarily log `peer_requirements` in
   `update_presentation_offset`. `run-under-load.ps1` runs one test with its output shown while a second
@@ -491,6 +494,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Check auto-delay monotonicity across runner scheduling changes" | Fix the Windows build 13 assertion that presumed fixed requirements after warm-up based on a later timer probe. Allow legitimate increases, reject decreases, and retain the 1 ms checks on all three speakers against the delay history. Fixed-requirement stability remains covered by deterministic `DelayPolicy` tests. |
 | "Make recovery and restart checks independent of runner timing" | Replace the remaining cadence-sensitive startup/restart tests with deterministic engine tests, verified by mutations. Record mixer reset/fade spans to distinguish pulses erased by intentional realignment from unexplained loss; no audio/timing behavior changes. Verify injected stalls against observed gaps, and retain diagnostics on CI failures. |
 | "Wait for the joining receiver before measuring synchronized audio" | Fix the final macOS build 15 failure: the test began checking pulses before Bluetooth started playing. Wait for actual synchronized playback, then measure the delay history long enough to cover the maximum group delay. Keep the strict timing, unexplained-loss and audio-coverage assertions. |
+| "Cover microphone refresh retries across polling cycles" | Allow the automatic inventory refresh check to span a missed UDP response and a cached reply. Add controlled failure/recovery coverage proving that new microphones appear on the next refresh while the last good list remains visible. No production polling changes. |
 
 ## Open items and known limitations
 

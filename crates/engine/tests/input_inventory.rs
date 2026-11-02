@@ -129,11 +129,15 @@ fn inventory_errors_retry_without_publishing_an_empty_list() {
     assert_eq!(inputs(), None, "failed enumeration is not a successful empty inventory");
     host.fail.store(false, Ordering::SeqCst);
     assert!(wait_until(Duration::from_secs(3), || inputs().is_some_and(|l| l.devices == ["USB Mic"])));
+    host.inner.add_mic("New Mic", 0);
     host.fail.store(true, Ordering::SeqCst);
     let before = host.finished.load(Ordering::SeqCst);
     assert!(wait_until(Duration::from_secs(7), || host.finished.load(Ordering::SeqCst) > before));
     std::thread::sleep(Duration::from_millis(200)); // let the response, if any, reach the observer
     assert_eq!(inputs().unwrap().devices, ["USB Mic"], "a failed refresh must preserve the last list");
+    host.fail.store(false, Ordering::SeqCst);
+    assert!(wait_until(Duration::from_secs(7), || inputs().is_some_and(|l| l.devices == ["USB Mic", "New Mic"])),
+        "the next refresh must discover devices after a failed probe");
     b.shutdown();
     engine.shutdown();
 }

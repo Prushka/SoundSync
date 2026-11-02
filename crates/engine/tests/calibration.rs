@@ -239,7 +239,10 @@ fn remote_microphones_load_and_refresh_without_ui_commands() {
     assert!(wait_until(Duration::from_secs(3), || b.engine.status().peers.iter().any(|p| p.id == id(&a) && p.inputs == Some(InputList::default()))));
     // Even a host without device notifications is refreshed, with no visible UI or selection.
     b.host.add_mic("New Mic", 0);
-    assert!(wait_until(Duration::from_secs(7), || inputs().is_some_and(|list| list.devices.contains(&"New Mic".to_string()))));
+    // Refreshes use UDP every 5 s; the initial retry may still hit the 1 s cache. Allow two
+    // refresh cycles plus cache/status delivery, so a lost reply does not fail discovery.
+    assert!(wait_until(Duration::from_secs(12), || inputs().is_some_and(|list| list.devices.contains(&"New Mic".to_string()))),
+        "microphones did not refresh after two polling cycles: {:?}", a.engine.status().peers);
     b.shutdown();
     a.shutdown();
 }
