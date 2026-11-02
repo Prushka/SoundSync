@@ -312,6 +312,8 @@ Paths:
     that earlier capture/device scheduling was punctual (Windows build 13 grew from 85 to 90 ms).
     `DelayPolicy` unit tests check stability when requirements do not change.
   - `auto_delay_increases_when_slow_receiver_joins` records the measurement window with `DelayLog`.
+    It waits for the new receiver to emit audio in `Playing` state before opening that window;
+    a larger announced D does not prove the new peer has synchronized its clock or started playback.
     Even after three apparently stable seconds, the delay can grow during the final wait (build 10
     compared pulses against a stale 240 ms and reported them about 10 ms late). It still requires
     the delay to increase for the new receiver and every speaker to stay within 1 ms of a recorded delay.
@@ -488,6 +490,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Fix CI timing assertions for audio and microphone discovery" | Fix build 12's macOS streaming assertions: measure first emitted audio instead of the later `Playing` state, and identify pulses erased by exact fake-output gaps. Add a controlled stall and negative assertion regressions; retain the 600 ms startup bound, 1 ms sync tolerance and minimum audio coverage. Hold the inventory probe explicitly while clock discovery completes. No production syncing changes. |
 | "Check auto-delay monotonicity across runner scheduling changes" | Fix the Windows build 13 assertion that presumed fixed requirements after warm-up based on a later timer probe. Allow legitimate increases, reject decreases, and retain the 1 ms checks on all three speakers against the delay history. Fixed-requirement stability remains covered by deterministic `DelayPolicy` tests. |
 | "Make recovery and restart checks independent of runner timing" | Replace the remaining cadence-sensitive startup/restart tests with deterministic engine tests, verified by mutations. Record mixer reset/fade spans to distinguish pulses erased by intentional realignment from unexplained loss; no audio/timing behavior changes. Verify injected stalls against observed gaps, and retain diagnostics on CI failures. |
+| "Wait for the joining receiver before measuring synchronized audio" | Fix the final macOS build 15 failure: the test began checking pulses before Bluetooth started playing. Wait for actual synchronized playback, then measure the delay history long enough to cover the maximum group delay. Keep the strict timing, unexplained-loss and audio-coverage assertions. |
 
 ## Open items and known limitations
 

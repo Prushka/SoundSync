@@ -196,10 +196,17 @@ fn auto_delay_increases_when_slow_receiver_joins() {
         let d = m.engine.status().delay_ns.unwrap();
         d > before && d >= 155 * MS
     }), "D stayed at {} ms (before {} ms)", m.engine.status().delay_ns.unwrap() / MS, before / MS);
+    // A larger D can be announced before the new peer has synchronized its clock and started
+    // playback. Do not count pulses captured before it can play as lost audio (macOS build 15).
+    assert!(wait_until(Duration::from_secs(6), || {
+        slow.engine.status().streams.iter().any(|s| s.state == soundsync_core::player::PlayState::Playing)
+            && !slow.host.onsets("Bluetooth").is_empty()
+    }), "the new receiver never started synchronized playback: {:?}", slow.engine.status().streams);
     // The first estimate comes from the device lead; measured requirements can still grow
-    // later on a slow runner. Track the whole window instead of assuming the delay settles.
+    // later on a slow runner. Track the whole window instead of assuming the delay settles;
+    // six seconds leaves enough captured pulses even at the maximum two-second group delay.
     let t0 = now();
-    let delays = DelayLog::record(&m, Duration::from_secs(4));
+    let delays = DelayLog::record(&m, Duration::from_secs(6));
     let from = at(t0, 1.0);
     let to = now() - m.engine.status().delay_ns.unwrap() - 50 * MS;
     assert_in_sync(&m, "CABLE Input", &[(&m, "TV", 0), (&fast, "Speaker", 0), (&slow, "Bluetooth", 0)], &delays.during(from, to), from, to, MS, false);
