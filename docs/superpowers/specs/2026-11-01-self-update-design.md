@@ -179,13 +179,24 @@ reuse the number and cannot enqueue another restart. The receiver remembers hand
 own session, even if the requesting peer expires. Acknowledgements and status carry errors back to the
 controller. The app handles requests even while its window is hidden.
 
+An appended `Result` message carries the requesting node, its session, request number and terminal
+updater state. The original v1 status/request/acknowledgement encodings stay unchanged. Ordinary
+status packets can be older than an accepted retry, so they update progress but do not finish checks
+or failed installations. The app preserves the request identity through the worker and the UI's final
+swap; even an identical error on a retry produces a new result. Results repeat every second for up to
+6 minutes to tolerate packet loss, and a result can arrive before its acknowledgement.
+
 Each receiver rechecks the official latest-release metadata and uses the existing OS-specific updater,
 including size, checksum, unpacking, version verification, rollback and relaunch. No request supplies a
 download URL, executable, shell command or installation path. If the latest release changed since the
 button was shown, the receiver reports that and requires another click for the newly available build.
 
 The controller retries unacknowledged requests for 8 seconds and retains accepted operations for up to
-6 minutes. A restart is reported successful only after the device returns with the requested or newer
-build. Read-only folders, development builds and unavailable Mac bundles remain visible as errors or
+6 minutes. Restarting the network engine does not finish an installation: the app's download may still
+be running. Success requires the device to advertise the requested or newer running build; a staged
+download alone is not success. Offline timeout notices stay visible for 5 minutes after the timeout.
+Read-only folders, development builds and unavailable Mac bundles remain visible as errors or
 unavailable statuses. Tests cover authentication, incompatible protocols, replay/session checks, lost
-acknowledgements, restart confirmation and reuse of the existing verified download path.
+acknowledgements and results, reordered prior-attempt failures, network restarts, timeout retention,
+restart build confirmation and reuse of the existing verified download path. Integration tests derive
+their target release from the compiled build number, including CI's stamped builds.

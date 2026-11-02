@@ -254,10 +254,10 @@ impl SoundSyncApp {
         let Some(engine) = &self.engine else { return };
         while let Some(request) = engine.take_update_request() {
             tracing::info!("update: {:?} requested by {} ({:016x})", request.action, request.name, request.sender);
-            match request.action {
-                UpdateAction::Check => self.updater.check_now(),
-                UpdateAction::Install { build } => self.updater.install_build(build),
-            }
+            self.updater.remote_update(request);
+        }
+        while let Some(result) = self.updater.take_remote_result() {
+            engine.command(Command::RemoteUpdateResult(result));
         }
         let state = self.updater.state().for_group();
         if self.published_update.as_ref() != Some(&state) {

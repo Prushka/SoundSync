@@ -40,7 +40,7 @@ use soundsync_core::config::Config;
 pub use command::Command;
 pub use net::NetImpair;
 pub use status::{CalibStatus, DeviceStatus, PeerStatus, Status, StreamStatus, VolumeStatus};
-pub use updates::{RemoteUpdateRequest, UpdatePeerStatus};
+pub use updates::{RemoteUpdateRequest, RemoteUpdateResult, UpdatePeerStatus};
 
 pub struct EngineOptions {
     pub config: Config,

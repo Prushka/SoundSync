@@ -6,27 +6,37 @@ use std::time::Duration;
 use soundsync_core::remote_update::{self, UpdateAction, UpdateInfo, UpdateMessage, UpdateState};
 use soundsync_core::protocol::{GroupKey, MAX_DATAGRAM};
 use soundsync_core::Os;
-use soundsync_engine::Command;
+use soundsync_engine::{Command, RemoteUpdateResult};
 use common::{Spec, spawn_with, wait_until};
 
 #[test]
 fn one_device_can_check_and_update_another_without_updating_itself() {
+    let build = soundsync_core::version::build_number().and_then(|b| b.parse::<u32>().ok()).unwrap_or(20).checked_add(1).unwrap();
     let a = spawn_with(Spec::new("controller"), |_| {}, |_| {});
     let b = spawn_with(Spec { peers: &[&a], ..Spec::new("receiver") }, |_| {}, |_| {});
-    b.engine.command(Command::PublishUpdate(UpdateState::Available { build: 21 }));
+    b.engine.command(Command::PublishUpdate(UpdateState::Available { build }));
     let id = b.engine.status().node_id;
-    assert!(wait_until(Duration::from_secs(5), || a.engine.status().updates.iter().any(|p| p.id == id && p.state == UpdateState::Available { build: 21 })));
+    assert!(wait_until(Duration::from_secs(5), || a.engine.status().updates.iter().any(|p| p.id == id && p.state == UpdateState::Available { build })));
     a.engine.command(Command::RemoteUpdate { node: id, action: UpdateAction::Check });
-    assert!(wait_until(Duration::from_secs(3), || b.engine.take_update_request().is_some_and(|r| r.action == UpdateAction::Check)));
+    let mut request = None;
+    assert!(wait_until(Duration::from_secs(3), || { request = b.engine.take_update_request(); request.is_some() }));
+    let request = request.unwrap();
+    assert_eq!(request.action, UpdateAction::Check);
     b.engine.command(Command::PublishUpdate(UpdateState::Checking));
     assert!(wait_until(Duration::from_secs(3), || a.engine.status().updates.iter().any(|p| p.id == id && p.state == UpdateState::Checking && !p.pending)));
-    b.engine.command(Command::PublishUpdate(UpdateState::Available { build: 21 }));
-    assert!(wait_until(Duration::from_secs(3), || a.engine.status().updates.iter().any(|p| p.id == id && p.state == UpdateState::Available { build: 21 } && p.requested.is_none())));
-    a.engine.command(Command::RemoteUpdate { node: id, action: UpdateAction::Install { build: 21 } });
-    assert!(wait_until(Duration::from_secs(3), || b.engine.take_update_request().is_some_and(|r| r.action == UpdateAction::Install { build: 21 })), "{:?}", a.engine.status().updates);
+    b.engine.command(Command::PublishUpdate(UpdateState::Available { build }));
+    b.engine.command(Command::RemoteUpdateResult(RemoteUpdateResult { request, state: UpdateState::Available { build } }));
+    assert!(wait_until(Duration::from_secs(3), || a.engine.status().updates.iter().any(|p| p.id == id && p.state == UpdateState::Available { build } && p.requested.is_none())));
+    a.engine.command(Command::RemoteUpdate { node: id, action: UpdateAction::Install { build } });
+    let mut request = None;
+    assert!(wait_until(Duration::from_secs(3), || { request = b.engine.take_update_request(); request.is_some() }), "{:?}", a.engine.status().updates);
+    let request = request.unwrap();
+    assert_eq!(request.action, UpdateAction::Install { build });
     assert!(a.engine.take_update_request().is_none(), "the controller was not asked to update");
-    b.engine.command(Command::PublishUpdate(UpdateState::Failed { error: "folder is read-only".into(), build: Some(21) }));
-    assert!(wait_until(Duration::from_secs(3), || a.engine.status().updates.iter().any(|p| matches!(&p.state, UpdateState::Failed { error, .. } if error == "folder is read-only"))));
+    let failed = UpdateState::Failed { error: "folder is read-only".into(), build: Some(build) };
+    b.engine.command(Command::PublishUpdate(failed.clone()));
+    b.engine.command(Command::RemoteUpdateResult(RemoteUpdateResult { request, state: failed }));
+    assert!(wait_until(Duration::from_secs(3), || a.engine.status().updates.iter().any(|p| p.requested.is_none() && p.notice.as_deref() == Some("folder is read-only"))));
     b.shutdown();
     a.shutdown();
 }

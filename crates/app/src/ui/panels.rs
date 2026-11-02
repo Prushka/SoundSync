@@ -386,7 +386,13 @@ fn group_update_cell(app: &SoundSyncApp, ui: &mut egui::Ui, peer: Option<&Update
             ui.label(if app.started.elapsed() < std::time::Duration::from_secs(8) { "Checking update support…" } else { "Update on this device once to enable remote updates." });
             return;
         };
-        if let Some(notice) = &p.notice {
+        let state_error = match &p.state {
+            GroupUpdateState::Failed { error, .. } | GroupUpdateState::Unavailable(error) => Some(error.as_str()),
+            _ => None,
+        };
+        if let Some(notice) = &p.notice
+            && (Some(notice.as_str()) != state_error || !p.online || p.pending || p.requested.is_some())
+        {
             ui.label(notice);
         }
         if let Some(build) = p.installable() {
@@ -400,7 +406,7 @@ fn group_update_cell(app: &SoundSyncApp, ui: &mut egui::Ui, peer: Option<&Update
             ui.label("Sending request…");
         } else if !p.online {
             ui.label(if matches!(p.requested, Some(UpdateAction::Install { .. })) { "Waiting for the device to restart…" } else { "Offline" });
-        } else if p.requested.is_some() && !p.state.busy() && !matches!(p.state, GroupUpdateState::Failed { .. }) {
+        } else if p.requested.is_some() && !p.state.busy() {
             ui.label("Waiting for the device…");
         } else {
             ui.label(super::format::group_update_state(&p.state));

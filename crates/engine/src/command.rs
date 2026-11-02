@@ -34,6 +34,8 @@ pub enum Command {
     ListInputs(NodeId),
     /// Publishes the app's updater state to the group; never installs anything by itself.
     PublishUpdate(UpdateState),
+    /// The app finished this specific check/download (or failed its final swap).
+    RemoteUpdateResult(crate::RemoteUpdateResult),
     /// A user click requesting a check or installation on one other node.
     RemoteUpdate { node: NodeId, action: UpdateAction },
 }

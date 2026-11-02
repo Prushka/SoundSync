@@ -325,6 +325,7 @@ impl Node {
             return;
         }
         match c {
+            Command::RemoteUpdateResult(result) => self.updates.result(result, self.host.now_ns()),
             Command::RemoteUpdate { node, action } => self.updates.request(&self.transport, self.session, node, action, self.host.now_ns()),
             Command::SyncTest(on) => self.sync_test_command(on),
             Command::StartCalibration { mic_node, mic_device, kind, check } => {

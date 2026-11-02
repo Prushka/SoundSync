@@ -69,6 +69,9 @@ pub enum UpdateMessage {
     /// Target session and increasing request number prevent duplicate or stale restarts.
     Request { target: NodeId, session: u64, request: u64, action: UpdateAction },
     Ack { target: NodeId, session: u64, request: u64, error: Option<String> },
+    /// Optional v1 extension. Only this request's result can finish its operation; ordinary
+    /// status packets may have been sent before the request. Keep the first three layouts intact.
+    Result { target: NodeId, session: u64, request: u64, state: UpdateState },
 }
 
 impl UpdateMessage {
@@ -77,6 +80,8 @@ impl UpdateMessage {
             Self::Status { info, .. } => info.name.len() <= 128 && info.version.len() <= 96 && info.state.valid(),
             Self::Request { request, .. } => *request > 0,
             Self::Ack { request, error, .. } => *request > 0 && error.as_ref().is_none_or(|s| s.len() <= MAX_TEXT),
+            Self::Result { request, state, .. } => *request > 0 && state.valid()
+                && (!state.busy() || matches!(state, UpdateState::Restarting { .. })),
         }
     }
 }

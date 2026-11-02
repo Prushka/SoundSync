@@ -166,6 +166,9 @@ Paths:
   the same UDP socket. Do not tie it to `PROTOCOL_VERSION`: it must continue to work across audio
   protocol changes. It uses the same group HMAC and LAN/static-peer admission rules. The existing
   `SSYN` audio/control wire format is unchanged by remote updates.
+  The original status/request/acknowledgement layouts are frozen; the appended `Result` message
+  identifies the requesting node, its session and request number so reordered statuses cannot finish
+  another attempt. Wire fixtures cover both the original layouts and this extension.
 - **Validate** every new numeric field from the network in `control_ok` or `read_audio_header`, and test it
   in `out_of_range_formats_and_values_are_rejected`. Examples:
   - Formats: 8–384 kHz, 1–32 channels.
@@ -258,14 +261,19 @@ Paths:
   published release, not necessarily the controller's build. The receiving app rechecks GitHub; if the
   advertised latest build changed, it asks for another click rather than installing a stale release.
 - **Transport:** `engine/src/updates.rs` maintains update peers separately from audio peers. Authenticated
-  status/request/acknowledgement messages use the existing UDP port, with no new firewall rule. Requests
-  name the target process session and use increasing request numbers. Retries reuse their number;
-  handled requests remain remembered for the receiving process's session, including across peer expiry.
+  status/request/acknowledgement/result messages use the existing UDP port, with no new firewall rule. Requests
+  name the target engine session and use increasing request numbers. Retries reuse their number;
+  handled requests remain remembered for the receiving engine's session, including across peer expiry.
   Nothing installs on discovery or an automatic check. No peer-supplied URL, file or command is executed.
   The app drains requests while hidden, then uses its existing download/verification/swap/relaunch path.
+  The updater carries each request's identity through checking, staging and a possible UI swap failure.
+  Results are repeated once a second for up to 6 min; a result can prove delivery before its ACK arrives.
 - **Progress and failure:** missing acknowledgements time out after 8 s; accepted operations time out
-  after 6 min. The table retains devices during an update and reports success only when a restarted
-  device advertises the requested or newer build. Errors such as a read-only folder are reported remotely.
+  after 6 min. The table retains devices during an update and offline errors for 5 min from the error,
+  not from the last packet. Network-only restarts do not finish installations; success requires the
+  requested or newer running build. Ordinary statuses cannot complete a check or failed install:
+  only its matching result can, including retries that fail with exactly the same error.
+  Errors such as a read-only folder are reported remotely.
   Development builds and headless engines advertise why they cannot self-update.
 - **First rollout:** builds predating remote update support cannot receive these requests. Their rows
   explain that they need one local update. Incompatible audio announcements are hints only, never an
@@ -312,6 +320,9 @@ Paths:
 - **Windows line endings:** Python's `open(p, 'w')` on Windows writes CRLF. The repo is LF (with
   `core.autocrlf=input`). Use `open(p, 'w', newline='\n')` or the editor tools. Check with
   `python -c "print(open(f,'rb').read().count(b'\r'))"`; Git Bash's `grep -c $'\r'` loops were unreliable.
+- **Build-sensitive tests:** CI stamps `SOUNDSYNC_BUILD` into every test binary. Remote-update fixtures
+  using real engines must choose a target above that stamped build, not a fixed build such as 21.
+  Check the integration tests in both development builds and with `SOUNDSYNC_BUILD=42`.
 - **Bash heredocs** containing Python with `'''` or `\u` break quoting. Write the script to a file with the
   Write tool, then run it.
 - **The exe is locked while SoundSync runs,** and closing the window only hides it. Quit with
@@ -518,6 +529,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Wait for the joining receiver before measuring synchronized audio" | Fix the final macOS build 15 failure: the test began checking pulses before Bluetooth started playing. Wait for actual synchronized playback, then measure the delay history long enough to cover the maximum group delay. Keep the strict timing, unexplained-loss and audio-coverage assertions. |
 | "Cover microphone refresh retries across polling cycles" | Allow the automatic inventory refresh check to span a missed UDP response and a cached reply. Add controlled failure/recovery coverage proving that new microphones appear on the next refresh while the last good list remains visible. No production polling changes. |
 | "Update other devices from the Overview group" | Add individual and bulk remote updates to the latest release, with builds, progress and errors in Group. Use independently versioned, authenticated management messages on the existing UDP socket so future audio protocol mismatches remain remotely repairable. Require one local update for legacy installations. Verify cross-protocol requests, group authentication, session/request deduplication, timeouts, restart build confirmation and the existing download checks; inspect the controls with silent loopback fixtures. |
+| "Fix remote update retries, restart tracking and CI build fixtures" | Reproduce four audit findings before fixing them: derive test upgrades from the stamped build, retain timeout notices from their creation time, keep tracking installs across engine restarts, and correlate updater results with each request. Preserve the original management wire layouts, repeat lost results, and carry swap failures back to the original requester. Add deterministic regressions and mutation checks for stale packets, request identity, premature success and lost results. |
 
 ## Open items and known limitations
 

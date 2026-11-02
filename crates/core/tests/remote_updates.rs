@@ -16,6 +16,9 @@ fn update_messages_work_independently_of_the_audio_protocol() {
         UpdateMessage::Request { target: 42, session: 99, request: 1, action: UpdateAction::Install { build: 21 } },
         UpdateMessage::Request { target: 42, session: 99, request: 2, action: UpdateAction::Check },
         UpdateMessage::Ack { target: 42, session: 99, request: 1, error: None },
+        UpdateMessage::Result { target: 42, session: 99, request: 1, state: UpdateState::Failed { error: "read-only folder".into(), build: Some(21) } },
+        UpdateMessage::Result { target: 42, session: 99, request: 2, state: UpdateState::UpToDate },
+        UpdateMessage::Result { target: 42, session: 99, request: 3, state: UpdateState::Restarting { build: 21 } },
     ];
     for message in messages {
         let mut bytes = [0; MAX_DATAGRAM];
@@ -40,6 +43,12 @@ fn updates_require_the_group_key_and_reject_damaged_or_oversized_packets() {
     let mut invalid = info();
     invalid.state = UpdateState::Downloading { build: 21, received: 100, total: 10 };
     assert!(remote_update::encode(7, 123, &UpdateMessage::Status { reply: true, info: invalid }, &key, &mut bytes).is_err());
+    for state in [UpdateState::Checking, UpdateState::Downloading { build: 21, received: 1, total: 10 },
+        UpdateState::Failed { error: "x".repeat(remote_update::MAX_TEXT + 1), build: Some(21) }]
+    {
+        assert!(remote_update::encode(7, 123, &UpdateMessage::Result { target: 42, session: 99, request: 1, state }, &key, &mut bytes).is_err());
+    }
+    assert!(remote_update::encode(7, 123, &UpdateMessage::Result { target: 42, session: 99, request: 0, state: UpdateState::UpToDate }, &key, &mut bytes).is_err());
 }
 
 #[test]
@@ -52,6 +61,7 @@ fn version_one_keeps_its_original_wire_layout() {
         } }, vec![0, 0, 1, b'M', 0, 1, b'v', 1, 20, 200, 4, 21]),
         (UpdateMessage::Request { target: 42, session: 99, request: 1, action: UpdateAction::Install { build: 21 } }, vec![1, 42, 99, 1, 1, 21]),
         (UpdateMessage::Ack { target: 42, session: 99, request: 1, error: None }, vec![2, 42, 99, 1, 0]),
+        (UpdateMessage::Result { target: 42, session: 99, request: 1, state: UpdateState::UpToDate }, vec![3, 42, 99, 1, 3]),
     ];
     for (message, body) in cases {
         let n = remote_update::encode(7, 123, &message, &key, &mut buf).unwrap();

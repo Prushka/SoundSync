@@ -10,6 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use soundsync_core::Os;
+use soundsync_core::remote_update::UpdateAction;
+use soundsync_engine::{RemoteUpdateRequest, RemoteUpdateResult};
 
 use install::{Staged, Target};
 use release::Release;
@@ -65,7 +67,7 @@ impl UpdateState {
 enum Request {
     Check,
     Install,
-    InstallBuild(u32),
+    Remote(RemoteUpdateRequest),
 }
 
 /// Checks GitHub on a background thread (after `first_check`, then every `every`, and when
@@ -73,6 +75,9 @@ enum Request {
 pub struct Updater {
     state: Arc<Mutex<UpdateState>>,
     requests: Option<Sender<Request>>,
+    active_remote: Arc<Mutex<Option<RemoteUpdateRequest>>>,
+    results_tx: Sender<RemoteUpdateResult>,
+    results: Receiver<RemoteUpdateResult>,
 }
 
 struct Worker {
@@ -83,10 +88,14 @@ struct Worker {
     api_url: String,
     asset: &'static str,
     client: fetch::Client,
+    active_remote: Arc<Mutex<Option<RemoteUpdateRequest>>>,
+    results: Sender<RemoteUpdateResult>,
 }
 
 impl Updater {
     pub fn start(target: Result<Target, String>, current_build: Option<u32>, api_url: String, first_check: Duration, every: Duration, on_change: Box<dyn Fn() + Send>) -> Updater {
+        let active_remote = Arc::new(Mutex::new(None));
+        let (results_tx, results) = unbounded();
         let ready = target.and_then(|t| {
             let build = current_build.ok_or_else(|| install::DEV_BUILD.to_string())?;
             let asset = release::asset_name(Os::current()).ok_or_else(|| "SoundSync updates itself only on Windows and macOS.".to_string())?;
@@ -94,16 +103,17 @@ impl Updater {
         });
         let (target, build, asset) = match ready {
             Ok(r) => r,
-            Err(why) => return Updater { state: Arc::new(Mutex::new(UpdateState::Unavailable(why))), requests: None },
+            Err(why) => return Updater { state: Arc::new(Mutex::new(UpdateState::Unavailable(why))), requests: None, active_remote, results_tx, results },
         };
         let state = Arc::new(Mutex::new(UpdateState::Idle));
         let (tx, rx) = unbounded();
-        let worker = Worker { state: state.clone(), on_change, target, build, api_url, asset, client: fetch::Client::new() };
+        let worker = Worker { state: state.clone(), on_change, target, build, api_url, asset, client: fetch::Client::new(),
+            active_remote: active_remote.clone(), results: results_tx.clone() };
         let spawned = std::thread::Builder::new().name("soundsync-update".into()).spawn(move || worker.run(rx, first_check, every));
         if let Err(e) = spawned {
             *state.lock().unwrap() = UpdateState::Unavailable(format!("cannot start the updater: {e}"));
         }
-        Updater { state, requests: Some(tx) }
+        Updater { state, requests: Some(tx), active_remote, results_tx, results }
     }
 
     pub fn state(&self) -> UpdateState {
@@ -123,11 +133,15 @@ impl Updater {
         }
     }
 
-    /// A remote click selects an advertised build. Recheck GitHub before installing it.
-    pub fn install_build(&self, build: u32) {
-        if let Some(tx) = &self.requests {
-            let _ = tx.send(Request::InstallBuild(build));
+    /// Keep the request identity through the worker, download and UI-thread swap.
+    pub fn remote_update(&self, request: RemoteUpdateRequest) {
+        if self.requests.as_ref().is_none_or(|tx| tx.send(Request::Remote(request.clone())).is_err()) {
+            let _ = self.results_tx.send(RemoteUpdateResult { request, state: self.state().for_group() });
         }
+    }
+
+    pub fn take_remote_result(&self) -> Option<RemoteUpdateResult> {
+        self.results.try_recv().ok()
     }
 
     /// The staged build, once: the state moves on to `Restarting`.
@@ -143,6 +157,9 @@ impl Updater {
         let mut state = self.state.lock().unwrap();
         if let UpdateState::Restarting(r) = state.clone() {
             *state = UpdateState::Failed { error, release: Some(r) };
+            if let Some(request) = self.active_remote.lock().unwrap().clone() {
+                let _ = self.results_tx.send(RemoteUpdateResult { request, state: state.for_group() });
+            }
         }
     }
 }
@@ -157,16 +174,48 @@ impl Worker {
         let mut next = Instant::now() + first_check;
         loop {
             match requests.recv_timeout(next.saturating_duration_since(Instant::now())) {
-                Ok(Request::Check) => self.check(true),
-                Ok(Request::Install) => self.install(),
-                Ok(Request::InstallBuild(build)) => self.install_latest(build),
+                Ok(Request::Remote(request)) => self.remote_update(request),
+                Ok(request) => {
+                    if !self.state.lock().unwrap().busy() {
+                        *self.active_remote.lock().unwrap() = None;
+                        match request {
+                            Request::Check => self.check(true),
+                            Request::Install => self.install(),
+                            Request::Remote(_) => unreachable!(),
+                        }
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => {
-                    self.check(false);
+                    if !self.state.lock().unwrap().busy() {
+                        *self.active_remote.lock().unwrap() = None;
+                        self.check(false);
+                    }
                     next = Instant::now() + every;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
+    }
+
+    fn remote_update(&self, request: RemoteUpdateRequest) {
+        if self.state.lock().unwrap().busy() {
+            let state = soundsync_core::remote_update::UpdateState::Failed {
+                error: "This device is already checking or installing an update.".into(), build: None,
+            };
+            let _ = self.results.send(RemoteUpdateResult { request, state });
+            return;
+        }
+        *self.active_remote.lock().unwrap() = Some(request.clone());
+        match request.action {
+            UpdateAction::Check => self.check(true),
+            UpdateAction::Install { build } => self.install_latest(build),
+        }
+        // Send while holding the state lock so a later UI swap failure cannot be overtaken
+        // by this worker's earlier "ready to restart" result.
+        let state = self.state.lock().unwrap();
+        let _ = self.results.send(RemoteUpdateResult { request, state: state.for_group() });
+        drop(state);
+        (self.on_change)();
     }
 
     /// An automatic check that fails (offline, rate-limited) leaves the state as it was; a check
@@ -262,6 +311,10 @@ mod tests {
         Updater::start(Ok(Target::Exe(exe)), Some(build), format!("{api}/latest"), first_check, HOUR, Box::new(|| {}))
     }
 
+    fn remote_request(number: u64, action: UpdateAction) -> RemoteUpdateRequest {
+        RemoteUpdateRequest { sender: 42, session: 100, request: number, name: "controller".into(), action }
+    }
+
     #[test]
     fn a_newer_release_becomes_available() {
         let (url, _) = serve(vec![(200, LATEST.as_bytes().to_vec())]);
@@ -313,7 +366,7 @@ mod tests {
     fn a_remote_install_rechecks_latest_and_does_not_install_a_changed_release() {
         let (url, seen) = serve(vec![(200, LATEST.as_bytes().to_vec())]);
         let updater = start(&url, 6, HOUR);
-        updater.install_build(7);
+        updater.remote_update(remote_request(1, UpdateAction::Install { build: 7 }));
         let s = wait_for(&updater, |s| matches!(s, UpdateState::Failed { .. }));
         assert!(matches!(&s, UpdateState::Failed { error, release: Some(r) } if r.build == 8 && error.contains("changed")), "{s:?}");
         assert_eq!(*seen.lock().unwrap(), ["/latest"], "only metadata was fetched; no stale build or download supplied by another node");
@@ -333,9 +386,46 @@ mod tests {
         }
         let (url, _) = serve(vec![(200, serde_json::to_vec(&release).unwrap())]);
         let updater = start(&url, 7, HOUR);
-        updater.install_build(8);
+        updater.remote_update(remote_request(1, UpdateAction::Install { build: 8 }));
         let s = wait_for(&updater, |s| matches!(s, UpdateState::Failed { .. }));
         assert!(matches!(&s, UpdateState::Failed { error, release: Some(r) } if r.build == 8 && error.contains("zip")), "{s:?}");
         assert_eq!(*downloaded.lock().unwrap(), ["/update.zip"]);
+    }
+
+    #[test]
+    fn identical_remote_failures_still_report_each_requests_identity() {
+        let (url, seen) = serve(vec![(403, b"rate limited".to_vec()), (403, b"rate limited".to_vec())]);
+        let updater = start(&url, 7, HOUR);
+        let mut results = Vec::new();
+        for number in [1, 2] {
+            let request = remote_request(number, UpdateAction::Check);
+            updater.remote_update(request.clone());
+            let result = updater.results.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(result.request, request, "an unchanged error must still complete the new request");
+            assert!(matches!(&result.state, soundsync_core::remote_update::UpdateState::Failed { error, .. } if error.contains("403")));
+            results.push(result.state);
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(*seen.lock().unwrap(), ["/latest", "/latest"], "a retry must actually check again");
+    }
+
+    #[test]
+    fn rejecting_a_busy_request_preserves_the_original_swaps_failure_result() {
+        use soundsync_core::remote_update::UpdateState as Remote;
+        let updater = start("http://127.0.0.1:1", 7, HOUR);
+        let release = release::parse_latest(LATEST, release::asset_name(Os::current()).unwrap()).unwrap();
+        let original = remote_request(1, UpdateAction::Install { build: release.build });
+        *updater.state.lock().unwrap() = UpdateState::Restarting(release.clone());
+        *updater.active_remote.lock().unwrap() = Some(original.clone());
+        let extra = remote_request(2, UpdateAction::Check);
+        updater.remote_update(extra.clone());
+        let rejected = updater.results.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(rejected.request, extra);
+        assert!(matches!(rejected.state, Remote::Failed { .. }));
+        assert_eq!(updater.state(), UpdateState::Restarting(release.clone()), "rejecting another request must not discard the staged update");
+        updater.swap_failed("cannot replace the running app".into());
+        let failed = updater.results.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(failed.request, original, "the swap still belongs to the first installation");
+        assert_eq!(failed.state, Remote::Failed { error: "cannot replace the running app".into(), build: Some(release.build) });
     }
 }
