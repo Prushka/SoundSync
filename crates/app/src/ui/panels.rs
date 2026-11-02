@@ -2,6 +2,7 @@
 
 use eframe::egui::{self, Color32, RichText};
 use soundsync_audio::DeviceInfo;
+use soundsync_core::calib::CalibKind;
 use soundsync_core::layout::describe;
 use soundsync_core::protocol::VolumeChange;
 use soundsync_core::{MasterMode, Nanos, NodeId, Os};
@@ -365,7 +366,7 @@ fn sync(app: &mut SoundSyncApp, ui: &mut egui::Ui) {
 
 fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
     ui.heading("Auto-calibrate with a microphone");
-    ui.label("Place a microphone where you listen. The speakers take turns playing a short sweep, three times each; SoundSync measures when and how loud each one arrives, corrects the extra latencies and turns louder speakers down to the quietest one. Check measures what is left afterwards. Avoid Bluetooth headset microphones.");
+    ui.label("Place a microphone where you listen, then calibrate latency or volume separately. Each calibration plays three short sweeps per speaker; Check plays one. Avoid Bluetooth headset microphones.");
     let mic_node = app.drafts.mic_node.unwrap_or(st.node_id);
     egui::Grid::new("calib").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Microphone on");
@@ -399,8 +400,9 @@ fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
             }
         } else {
             let peer = st.peers.iter().find(|p| p.id == mic_node);
-            match peer.and_then(|p| p.inputs.as_ref()) {
-                Some(list) => {
+            ui.horizontal(|ui| {
+                let list = peer.and_then(|p| p.inputs.as_ref());
+                if let Some(list) = list {
                     let default = list.default.as_deref().map_or("Default".to_string(), |d| format!("Default ({d})"));
                     let current = app.drafts.mic_device.clone();
                     let shown = if current.is_empty() { default.clone() } else { current.clone() };
@@ -414,77 +416,110 @@ fn calibration(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status) {
                             }
                         }
                     });
+                    if list.devices.is_empty() {
+                        ui.label(RichText::new("No microphones connected").weak());
+                    }
+                } else {
+                    ui.label(RichText::new(if peer.is_some() { "Loading microphones…" } else { "Device disconnected" }).weak());
                 }
-                None => {
-                    ui.label(RichText::new(format!("asking {} for its microphones…", peer.map_or("it", |p| p.name.as_str()))).weak());
+                if ui.add_enabled(peer.is_some(), egui::Button::new("🔄")).on_hover_text("Refresh microphones").clicked() {
+                    app.command(Command::ListInputs(mic_node));
                 }
-            }
+            });
         }
         ui.end_row();
     });
+    // Read again after the selector, so a click always uses the newly selected device.
+    let mic_node = app.drafts.mic_node.unwrap_or(st.node_id);
+    for kind in [CalibKind::Latency, CalibKind::Volume] {
+        ui.add_space(8.0);
+        let title = match kind { CalibKind::Latency => "Latency", CalibKind::Volume => "Volume" };
+        ui.push_id(title, |ui| {
+            ui.group(|ui| calibration_kind(app, ui, st, mic_node, kind));
+        });
+    }
+}
+
+fn calibration_kind(app: &mut SoundSyncApp, ui: &mut egui::Ui, st: &Status, mic_node: NodeId, kind: CalibKind) {
+    let (title, name, description) = match kind {
+        CalibKind::Latency => ("Latency", "latency", "Align when the speakers are heard by correcting their extra latencies."),
+        CalibKind::Volume => ("Volume", "volume", "Match loudness at your listening position by turning louder speakers down to the quietest one."),
+    };
+    ui.heading(title);
+    ui.label(description);
+    let running = matches!(st.calibration, CalibStatus::Running { .. });
+    let ours_running = matches!(st.calibration, CalibStatus::Running { kind: k, .. } if k == kind);
+    let mic_available = if mic_node == st.node_id {
+        app.capture_devices.iter().any(|d| d.active)
+    } else {
+        st.peers.iter().find(|p| p.id == mic_node).and_then(|p| p.inputs.as_ref()).is_some_and(|list| !list.devices.is_empty())
+    };
     ui.horizontal(|ui| {
-        let running = matches!(st.calibration, CalibStatus::Running { .. });
         let mic_device = app.drafts.mic_device.clone();
         if ui
-            .add_enabled(!running, egui::Button::new("Start"))
+            .add_enabled(!running && mic_available, egui::Button::new(format!("Calibrate {name}")))
             .on_hover_text("Three sweeps per speaker; corrections are shown before you apply them")
             .clicked()
         {
-            app.command(Command::StartCalibration { mic_node, mic_device: mic_device.clone(), check: false });
+            app.command(Command::StartCalibration { mic_node, mic_device: mic_device.clone(), kind, check: false });
         }
         if ui
-            .add_enabled(!running, egui::Button::new("Check"))
+            .add_enabled(!running && mic_available, egui::Button::new(format!("Check {name}")))
             .on_hover_text("One quick sweep per speaker: measures how far each one is still off")
             .clicked()
         {
-            app.command(Command::StartCalibration { mic_node, mic_device, check: true });
+            app.command(Command::StartCalibration { mic_node, mic_device, kind, check: true });
         }
-        if ui.add_enabled(running, egui::Button::new("Cancel")).clicked() {
+        if ours_running && ui.button("Cancel").clicked() {
             app.command(Command::CancelCalibration);
         }
-        if let CalibStatus::Done { check, .. } = &st.calibration {
-            let label = if *check { "Correct these" } else { "Apply" };
-            if ui.button(label).clicked() {
-                app.command(Command::ApplyCalibration { match_volumes: app.drafts.match_volumes });
-                app.notice = Some("Corrections applied. Run Check to measure what is left.".into());
+        if let CalibStatus::Done { session, kind: k, .. } = &st.calibration
+            && *k == kind
+        {
+            let label = format!("Apply {name}");
+            if ui.button(label).on_hover_text(format!("Apply this result, then run Check {name} to measure what is left")).clicked() {
+                app.command(Command::ApplyCalibration { session: *session, kind });
             }
-            ui.checkbox(&mut app.drafts.match_volumes, "Also match volumes")
-                .on_hover_text("Turns every speaker that arrived louder down to the quietest one (by its own volume)");
         }
     });
     match &st.calibration {
-        CalibStatus::Idle => {}
-        CalibStatus::Running { step, total } => {
+        CalibStatus::Running { kind: k, step, total } if *k == kind => {
             ui.add(egui::ProgressBar::new(*step as f32 / (*total).max(1) as f32).text(format!("sweep {} of {total}…", (*step + 1).min(*total))));
         }
-        CalibStatus::Failed(msg) => {
-            ui.label(RichText::new(format!("Calibration failed: {msg}")).color(WARN));
+        CalibStatus::Failed { kind: k, message } if *k == kind => {
+            ui.label(RichText::new(format!("{title} calibration failed: {message}")).color(WARN));
         }
-        CalibStatus::Done { results, check, .. } => {
-            ui.label(if *check {
-                "Left over (one sweep each; within 1 ms is in sync):"
-            } else {
-                "Measured corrections (Apply adds them to the extra latencies and turns louder speakers down):"
+        CalibStatus::Done { results, check, kind: k, .. } if *k == kind => {
+            ui.label(match (kind, check) {
+                (CalibKind::Latency, true) => "Remaining timing differences (within 1 ms is in sync):",
+                (CalibKind::Latency, false) => "Measured corrections to add to each speaker's extra latency:",
+                (CalibKind::Volume, true) => "Remaining loudness differences (within 1 dB is matched):",
+                (CalibKind::Volume, false) => "Measured levels above the quietest speaker (Apply volume turns these down):",
             });
-            egui::Grid::new("calib_result").striped(true).num_columns(5).spacing([16.0, 4.0]).show(ui, |ui| {
+            egui::Grid::new("calib_result").striped(true).num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
                 ui.label(RichText::new("Speaker").strong());
-                ui.label(RichText::new(if *check { "Off by" } else { "Correction" }).strong());
-                ui.label(RichText::new("Level").strong()).on_hover_text("How much louder than the quietest speaker it arrived");
+                ui.label(RichText::new(match kind {
+                    CalibKind::Latency => if *check { "Off by" } else { "Correction" },
+                    CalibKind::Volume => "Level above quietest",
+                }).strong());
                 ui.label(RichText::new("Signal").strong());
                 ui.label(RichText::new("").strong());
                 ui.end_row();
                 for r in results {
                     let name = if r.node == st.node_id { st.name.clone() } else { st.peers.iter().find(|p| p.id == r.node).map_or("?".into(), |p| p.name.clone()) };
                     ui.label(name);
-                    ui.label(format!("{:+.1} ms", r.delta_ns as f64 / 1e6));
-                    ui.label(fmt_level(r.level_db));
+                    ui.label(match kind {
+                        CalibKind::Latency => format!("{:+.1} ms", r.delta_ns as f64 / 1e6),
+                        CalibKind::Volume => fmt_level(r.level_db),
+                    });
                     ui.label(super::format::fmt_snr(r.snr_db));
-                    let (note, ok) = super::format::calib_note(r, *check);
+                    let (note, ok) = super::format::calib_note(r, kind, *check);
                     ui.label(if ok { RichText::new(note) } else { RichText::new(format!("⚠ {note}")).color(WARN) });
                     ui.end_row();
                 }
             });
         }
+        _ => {}
     }
 }
 

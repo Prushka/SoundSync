@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use soundsync_core::calib::CalibKind;
 use soundsync_core::player::PlayState;
 use soundsync_core::protocol::{InputList, OutputInfo, RxStat};
 use soundsync_core::{MasterMode, Nanos, NodeId, Os, Role, StreamFormat};
@@ -31,7 +32,7 @@ pub struct PeerStatus {
     pub app_version: String,
     /// Its Volume slider, once it has reported it.
     pub volume: Option<VolumeStatus>,
-    /// Its microphones, once asked for (`Command::ListInputs`).
+    /// Its microphones, fetched automatically while connected, including with the UI hidden.
     pub inputs: Option<InputList>,
 }
 
@@ -62,10 +63,10 @@ pub struct StreamStatus {
 pub enum CalibStatus {
     #[default]
     Idle,
-    Running { step: usize, total: usize },
+    Running { kind: CalibKind, step: usize, total: usize },
     /// Per-device corrections (or, for a check run, what is left) with their quality.
-    Done { session: u32, results: Vec<soundsync_core::calib::CalibResult>, check: bool },
-    Failed(String),
+    Done { session: u32, results: Vec<soundsync_core::calib::CalibResult>, kind: CalibKind, check: bool },
+    Failed { kind: CalibKind, message: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]

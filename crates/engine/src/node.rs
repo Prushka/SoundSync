@@ -12,8 +12,7 @@ use crossbeam_channel::{Receiver, Sender, select, tick};
 use soundsync_audio::{AudioHost, DeviceEvent};
 use soundsync_core::clock::ClockSample;
 use soundsync_core::config::Config;
-use soundsync_audio::Direction;
-use soundsync_core::protocol::{Control, Hello, InputList, PROTOCOL_VERSION, control_fits};
+use soundsync_core::protocol::{Control, Hello, PROTOCOL_VERSION};
 use soundsync_core::{Nanos, NodeId, Os, Role};
 
 use crate::calibration::CalibState;
@@ -30,6 +29,8 @@ const HELLO_RETRY_NS: Nanos = 1_000_000_000;
 /// How long a datagram from another SoundSync version keeps its warning up.
 const OTHER_VERSION_WARNING_NS: Nanos = 10_000_000_000;
 const STATUS_EVERY_NS: Nanos = 100_000_000;
+const INPUTS_RETRY_NS: Nanos = 1_000_000_000;
+const INPUTS_REFRESH_NS: Nanos = 5_000_000_000;
 
 pub(crate) struct Node {
     pub config: Config,
@@ -66,6 +67,7 @@ pub(crate) struct Node {
     pub device_events: Option<Receiver<DeviceEvent>>,
     /// Device notifications so far (the UI refreshes its device lists when this moves).
     pub device_event_count: u64,
+    pub inputs: crate::inputs::InputInventory,
     _device_watch: Option<Box<dyn Send>>,
     gap_host: GapDetector,
     gap_wall: GapDetector,
@@ -95,6 +97,7 @@ impl Node {
         status: Arc<ArcSwap<Status>>,
         routes: Sender<RxCmd>,
         counters: Arc<RxCounters>,
+        inputs: crate::inputs::InputInventory,
     ) -> Node {
         let hello_targets = resolve_static(&config.network.static_peers);
         let static_ips = hello_targets.iter().map(|a| a.ip()).collect();
@@ -128,6 +131,7 @@ impl Node {
             last_status: 0,
             device_events: None,
             device_event_count: 0,
+            inputs,
             _device_watch: None,
             gap_host: GapDetector::default(),
             gap_wall: GapDetector::default(),
@@ -281,9 +285,16 @@ impl Node {
             return;
         }
         match control {
-            Control::ListInputs => self.send(from, &Control::Inputs(self.input_list())),
+            Control::ListInputs => {
+                if let Some(list) = self.inputs.request(sender, self.host.now_ns()) {
+                    self.send(from, &Control::Inputs(list));
+                }
+            }
             Control::Inputs(list) => {
                 if let Some(p) = self.peers.get_mut(sender) {
+                    if p.inputs.as_ref() != Some(&list) {
+                        tracing::info!("microphones on {}: {} inputs, default {:?}", p.name, list.devices.len(), list.default);
+                    }
                     p.inputs = Some(list);
                 }
             }
@@ -300,17 +311,18 @@ impl Node {
         }
         match c {
             Command::SyncTest(on) => self.sync_test_command(on),
-            Command::StartCalibration { mic_node, mic_device, check } => {
+            Command::StartCalibration { mic_node, mic_device, kind, check } => {
+                self.calib.stale_apply = false;
                 if mic_node == self.id() {
-                    self.start_calibration(&mic_device, check);
+                    self.start_calibration(&mic_device, kind, check);
                 } else if let Some(p) = self.peers.get(mic_node) {
-                    self.send(p.addr, &Control::Calib(soundsync_core::protocol::CalibMsg::Request { mic_device, check }));
-                    self.calib.status = crate::status::CalibStatus::Running { step: 0, total: self.peers.len() + 1 };
+                    self.send(p.addr, &Control::Calib(soundsync_core::protocol::CalibMsg::Request { mic_device, kind, check }));
+                    self.calib.status = crate::status::CalibStatus::Running { kind, step: 0, total: self.peers.len() + 1 };
                 } else {
-                    self.warn("calibration: the chosen microphone node is not connected");
+                    self.calib.status = crate::status::CalibStatus::Failed { kind, message: "the chosen microphone node is not connected".into() };
                 }
             }
-            Command::ApplyCalibration { match_volumes } => self.apply_calibration(match_volumes),
+            Command::ApplyCalibration { session, kind } => self.apply_calibration(session, kind),
             Command::CancelCalibration => self.cancel_calibration(),
             Command::ListInputs(node) => {
                 if let Some(p) = self.peers.get(node) {
@@ -338,19 +350,6 @@ impl Node {
         self.inbound_ok = !inbound_suspect(now, self.first_unanswered, self.counters.last_heard_ns());
     }
 
-    /// This node's connected microphones, as many as fit in one answer.
-    fn input_list(&self) -> InputList {
-        let devices = self.host.devices(Direction::Capture).unwrap_or_default();
-        let mut list = InputList {
-            default: devices.iter().find(|d| d.is_default && d.active).map(|d| d.name.clone()),
-            devices: devices.iter().filter(|d| d.active).map(|d| d.name.clone()).collect(),
-        };
-        while !list.devices.is_empty() && !control_fits(&Control::Inputs(list.clone())) {
-            list.devices.pop();
-        }
-        list
-    }
-
     /// Notes on current conditions that need no action (recomputed for every status).
     fn condition_notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
@@ -364,6 +363,9 @@ impl Node {
     /// Warnings that reflect a current condition (recomputed for every status).
     fn condition_warnings(&self, now: Nanos) -> Vec<String> {
         let mut w = self.layout_warnings();
+        if self.calib.stale_apply {
+            w.push("Calibration result changed before Apply. Review the current result and apply again.".into());
+        }
         if let Some(o) = *self.counters.other_version.lock().unwrap()
             && now - o.at_ns < OTHER_VERSION_WARNING_NS
         {
@@ -412,19 +414,34 @@ impl Node {
             }
         }
         let mut pings = Vec::new();
+        let mut input_requests = Vec::new();
         for p in self.peers.iter_mut() {
             if now >= p.next_ping {
                 p.next_ping = now + p.ping_interval(now);
                 pings.push(p.addr);
             }
+            if now >= p.next_inputs {
+                p.next_inputs = now + if p.inputs.is_some() { INPUTS_REFRESH_NS } else { INPUTS_RETRY_NS };
+                input_requests.push(p.addr);
+            }
         }
         for addr in pings {
             self.send(addr, &Control::Ping { t1: self.host.now_ns() });
+        }
+        for addr in input_requests {
+            self.send(addr, &Control::ListInputs);
         }
         for gone in self.peers.expire(now) {
             tracing::info!("peer {} ({:016x}) timed out", gone.name, gone.id);
         }
         self.devices_tick(now);
+        if let Some((peers, list)) = self.inputs.poll(now) {
+            for id in peers {
+                if let Some(p) = self.peers.get(id) {
+                    self.send(p.addr, &Control::Inputs(list.clone()));
+                }
+            }
+        }
         self.media_tick(now);
         self.calibration_tick(now);
         self.sync_test_tick(now);

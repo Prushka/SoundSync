@@ -199,7 +199,14 @@ pub const MAX_LEVEL_SPREAD_DB: f32 = 2.0;
 /// scale), which makes a loud speaker measure quieter than it is.
 pub const OVERLOAD_DBFS: f32 = -6.0;
 
-/// One device's outcome of a calibration (or check) run.
+/// The setting a calibration (or check) run measures and corrects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CalibKind {
+    Latency,
+    Volume,
+}
+
+/// Measurements from one speaker; only the run's chosen kind is applied.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CalibResult {
     pub node: NodeId,
@@ -221,18 +228,18 @@ pub struct CalibResult {
 
 impl CalibResult {
     /// Reasons to doubt this measurement; empty when it looks good.
-    pub fn problems(&self) -> Vec<String> {
+    pub fn problems(&self, kind: CalibKind) -> Vec<String> {
         let mut p = Vec::new();
         if self.heard < self.sweeps {
             p.push(format!("heard {} of {} sweeps", self.heard, self.sweeps));
         }
-        if self.spread_ns > MAX_SPREAD_NS {
+        if kind == CalibKind::Latency && self.spread_ns > MAX_SPREAD_NS {
             p.push(format!("sweeps disagree by {:.1} ms", self.spread_ns as f64 / 1e6));
         }
         if self.snr_db < WEAK_SNR_DB {
             p.push(format!("weak signal ({:.0} dB)", self.snr_db));
         }
-        if self.level_spread_db > MAX_LEVEL_SPREAD_DB {
+        if kind == CalibKind::Volume && self.level_spread_db > MAX_LEVEL_SPREAD_DB {
             p.push(format!("level varied by {:.1} dB between sweeps (the microphone may adjust its own gain)", self.level_spread_db));
         }
         if self.peak_dbfs > OVERLOAD_DBFS {
@@ -422,9 +429,10 @@ mod tests {
         assert_eq!(by(3).delta_ns, 20_000_000 - 5_050_000);
         assert_eq!((by(1).heard, by(1).sweeps, by(1).spread_ns), (3, 3, 3 * MS));
         assert_eq!(by(1).snr_db, 36.0, "the weakest sweep counts");
-        assert_eq!(by(1).problems(), vec!["sweeps disagree by 3.0 ms".to_string()]);
-        assert_eq!(by(2).problems(), vec!["heard 2 of 3 sweeps".to_string()]);
-        assert_eq!(by(3).problems(), vec!["weak signal (25 dB)".to_string()]);
+        assert_eq!(by(1).problems(CalibKind::Latency), vec!["sweeps disagree by 3.0 ms".to_string()]);
+        assert!(by(1).problems(CalibKind::Volume).is_empty(), "timing spread does not affect volume matching");
+        assert_eq!(by(2).problems(CalibKind::Latency), vec!["heard 2 of 3 sweeps".to_string()]);
+        assert_eq!(by(3).problems(CalibKind::Latency), vec!["weak signal (25 dB)".to_string()]);
         let missing = [(1, vec![heard(MS, 40.0)]), (7, vec![None, None, None])];
         assert_eq!(calibration_results(&missing, CalibReference::Median), Err(7), "a device never heard fails the run");
     }
@@ -443,8 +451,8 @@ mod tests {
         assert_eq!(by(2).level_db, 5.5);
         assert_eq!(by(3).level_db, 8.0);
         assert_eq!(by(3).peak_dbfs, -3.3, "the loudest sample of the speaker's sweeps");
-        assert!(by(2).problems().iter().all(|p| !p.contains("overloaded")));
-        assert_eq!(by(3).problems(), vec!["microphone overloaded (peaks at -3 dBFS)".to_string()]);
+        assert!(by(2).problems(CalibKind::Volume).iter().all(|p| !p.contains("overloaded")));
+        assert_eq!(by(3).problems(CalibKind::Volume), vec!["microphone overloaded (peaks at -3 dBFS)".to_string()]);
     }
 
     #[test]
@@ -455,8 +463,9 @@ mod tests {
         let sweep = |level_db: f32| Some(Heard { residual_ns: 0, snr_db: 40.0, level_db, peak_dbfs: -15.0 });
         let measured = [(1, vec![sweep(-31.0), sweep(-28.8), sweep(-27.2)]), (2, vec![sweep(-20.0), sweep(-20.3), sweep(-19.9)])];
         let results = calibration_results(&measured, CalibReference::Median).unwrap();
-        assert_eq!(results[0].problems(), vec!["level varied by 3.8 dB between sweeps (the microphone may adjust its own gain)".to_string()]);
-        assert!(results[1].problems().is_empty(), "{:?}", results[1]);
+        assert_eq!(results[0].problems(CalibKind::Volume), vec!["level varied by 3.8 dB between sweeps (the microphone may adjust its own gain)".to_string()]);
+        assert!(results[0].problems(CalibKind::Latency).is_empty(), "automatic gain does not affect latency correction");
+        assert!(results[1].problems(CalibKind::Volume).is_empty(), "{:?}", results[1]);
     }
 
     #[test]

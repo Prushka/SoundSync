@@ -7,7 +7,7 @@ use std::time::Duration;
 use common::*;
 use soundsync_audio::fake::{FakeClock, FakeHost, FakeRoom};
 use soundsync_audio::{AudioHost, DeviceSelector};
-use soundsync_core::calib::click;
+use soundsync_core::calib::{CalibKind, click};
 use soundsync_core::protocol::InputList;
 use soundsync_core::config::Config;
 use soundsync_core::{Nanos, NodeId};
@@ -63,6 +63,12 @@ fn extra_of(n: &TestNode) -> Nanos {
     n.engine.status().extra_latency_ns
 }
 
+fn apply_calibration(n: &TestNode, expected: CalibKind) {
+    let CalibStatus::Done { session, kind, .. } = n.engine.status().calibration else { panic!("no result to apply") };
+    assert_eq!(kind, expected);
+    n.engine.command(Command::ApplyCalibration { session, kind });
+}
+
 /// Whether a speaker underran since true time `since`. A machine that stalls a speaker's thread
 /// past its buffer (CI runners do) cuts a hole into a sweep or delays its rest, which the run
 /// rightly reports as a doubtful sweep: only results that survive one bad sweep can be checked.
@@ -76,7 +82,7 @@ fn calibration_recovers_hidden_latencies() {
     let nodes = room_setup(&room);
     let mic_node = id(&nodes[0]);
     let started = now();
-    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: false });
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), kind: CalibKind::Latency, check: false });
     assert!(wait_until(Duration::from_secs(4), || matches!(nodes[1].engine.status().calibration, CalibStatus::Running { .. })
         || nodes[1].engine.status().streams_paused));
     assert!(wait_until(Duration::from_secs(16), || matches!(nodes[0].engine.status().calibration, CalibStatus::Done { .. })), "{:?}", nodes[0].engine.status().calibration);
@@ -87,10 +93,10 @@ fn calibration_recovers_hidden_latencies() {
     if !speakers_underran_since(&nodes, started) {
         for r in &results {
             assert_eq!((r.heard, r.sweeps), (3, 3), "{r:?}");
-            assert!(r.snr_db >= 30.0 && r.spread_ns < 500_000 && r.problems().is_empty(), "{r:?}");
+            assert!(r.snr_db >= 30.0 && r.spread_ns < 500_000 && r.problems(CalibKind::Latency).is_empty(), "{r:?}");
         }
     }
-    nodes[0].engine.command(Command::ApplyCalibration { match_volumes: true });
+    apply_calibration(&nodes[0], CalibKind::Latency);
     assert!(wait_until(Duration::from_secs(3), || extra_of(&nodes[2]) != 0 && extra_of(&nodes[0]) != 0));
     sleep(Duration::from_millis(300));
     for a in 0..3 {
@@ -103,7 +109,7 @@ fn calibration_recovers_hidden_latencies() {
     assert!(nodes.iter().all(|n| !n.engine.status().streams_paused));
     // A quick check (one sweep each) measures what is left: nothing worth correcting.
     let started = now();
-    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: true });
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), kind: CalibKind::Latency, check: true });
     assert!(wait_until(Duration::from_secs(10), || matches!(nodes[0].engine.status().calibration, CalibStatus::Done { check: true, .. })), "{:?}", nodes[0].engine.status().calibration);
     let CalibStatus::Done { results, .. } = nodes[0].engine.status().calibration.clone() else { unreachable!() };
     for r in &results {
@@ -126,38 +132,52 @@ fn spk() -> DeviceSelector {
     DeviceSelector::Name("Spk".into())
 }
 
-fn run_calibration(nodes: &[TestNode], check: bool) -> Vec<soundsync_core::calib::CalibResult> {
+fn run_calibration(nodes: &[TestNode], kind: CalibKind, check: bool) -> Vec<soundsync_core::calib::CalibResult> {
     let mic_node = id(&nodes[0]);
-    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check });
-    let done = || matches!(&nodes[0].engine.status().calibration, CalibStatus::Done { check: c, .. } if *c == check);
+    let previous = match nodes[0].engine.status().calibration { CalibStatus::Done { session, .. } => Some(session), _ => None };
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), kind, check });
+    let done = || matches!(&nodes[0].engine.status().calibration, CalibStatus::Done { session, kind: k, check: c, .. } if *c == check && *k == kind && Some(*session) != previous);
     assert!(wait_until(Duration::from_secs(20), done), "{:?}", nodes[0].engine.status().calibration);
     let CalibStatus::Done { results, .. } = nodes[0].engine.status().calibration.clone() else { unreachable!() };
     results
 }
 
 #[test]
-fn calibration_matches_volumes_to_the_quietest_speaker() {
+fn volume_calibration_matches_loudness_without_changing_latencies() {
     let room = FakeRoom::new(48_000);
     let nodes = room_setup(&room);
     // Device volumes 60%, 80%, 100%: -7.76, -3.39 and 0 dB on the fake volume curve.
     for (n, v) in nodes.iter().zip([0.6, 0.8, 1.0]) {
         n.host.set_endpoint_volume(&spk(), v).unwrap();
     }
+    let offsets = [5 * MS, 15 * MS, 50 * MS];
+    for (n, ns) in nodes.iter().zip(offsets) {
+        n.engine.command(Command::SetExtraLatency { node: id(n), ns });
+    }
+    assert!(wait_until(Duration::from_secs(3), || nodes.iter().map(extra_of).eq(offsets)));
     let db = |n: &TestNode| n.host.endpoint_volume(&spk()).unwrap().db;
     let want: Vec<f32> = nodes.iter().map(|n| db(n) - db(&nodes[0])).collect();
-    let results = run_calibration(&nodes, false);
+    let results = run_calibration(&nodes, CalibKind::Volume, false);
+    assert!(results.iter().any(|r| r.delta_ns.abs() > MS), "there must be timing errors to leave alone");
     for (n, want) in nodes.iter().zip(&want) {
         let r = results.iter().find(|r| r.node == id(n)).unwrap();
         assert!((r.level_db - want).abs() < 0.3, "{}: level {} dB, want {want} dB", n.engine.status().name, r.level_db);
     }
-    nodes[0].engine.command(Command::ApplyCalibration { match_volumes: true });
+    apply_calibration(&nodes[0], CalibKind::Volume);
     let quietest = db(&nodes[0]);
     assert!(wait_until(Duration::from_secs(3), || nodes.iter().all(|n| (db(n) - quietest).abs() < 0.3)), "{:?}", nodes.iter().map(db).collect::<Vec<_>>());
     sleep(Duration::from_millis(500));
     // A check now finds the speakers equally loud.
     let started = now();
-    for r in run_calibration(&nodes, true) {
+    assert_eq!(nodes.iter().map(extra_of).collect::<Vec<_>>(), offsets);
+    for r in run_calibration(&nodes, CalibKind::Volume, true) {
         assert!(r.level_db < 0.5 || speakers_underran_since(&nodes, started), "still louder after matching: {r:?}");
+    }
+    apply_calibration(&nodes[0], CalibKind::Volume);
+    assert!(wait_until(Duration::from_secs(3), || nodes[0].engine.status().calibration == CalibStatus::Idle));
+    for (n, expected) in nodes.iter().zip(offsets) {
+        assert_eq!(extra_of(n), expected, "volume Check/Apply must also leave latency alone");
+        assert_eq!(Config::load_or_create(&n.config_path()).unwrap().config.extra_latency_ns(), expected);
     }
     for n in nodes.into_iter().rev() {
         n.shutdown();
@@ -165,15 +185,19 @@ fn calibration_matches_volumes_to_the_quietest_speaker() {
 }
 
 #[test]
-fn applying_without_matching_volumes_leaves_them_alone() {
+fn latency_calibration_leaves_volumes_alone() {
     let room = FakeRoom::new(48_000);
     let nodes = room_setup(&room);
     nodes[2].host.set_endpoint_volume(&spk(), 0.5).unwrap();
-    let results = run_calibration(&nodes, false);
+    let results = run_calibration(&nodes, CalibKind::Latency, false);
     assert!(results.iter().any(|r| r.level_db > 5.0), "{results:?}");
-    nodes[0].engine.command(Command::ApplyCalibration { match_volumes: false });
+    apply_calibration(&nodes[0], CalibKind::Latency);
     assert!(wait_until(Duration::from_secs(3), || extra_of(&nodes[2]) != 0));
     sleep(Duration::from_millis(300));
+    assert_eq!(nodes.iter().map(|n| n.host.endpoint_volume(&spk()).unwrap().scalar).collect::<Vec<_>>(), vec![1.0, 1.0, 0.5]);
+    run_calibration(&nodes, CalibKind::Latency, true);
+    apply_calibration(&nodes[0], CalibKind::Latency);
+    assert!(wait_until(Duration::from_secs(3), || nodes[0].engine.status().calibration == CalibStatus::Idle));
     assert_eq!(nodes.iter().map(|n| n.host.endpoint_volume(&spk()).unwrap().scalar).collect::<Vec<_>>(), vec![1.0, 1.0, 0.5]);
     for n in nodes.into_iter().rev() {
         n.shutdown();
@@ -191,7 +215,7 @@ fn a_speaker_that_sleeps_after_silence_still_plays_its_first_sweep() {
         }
     });
     sleep(Duration::from_millis(4_500)); // silent long enough to fall asleep
-    let results = run_calibration(&nodes, false);
+    let results = run_calibration(&nodes, CalibKind::Latency, false);
     for r in &results {
         assert_eq!((r.heard, r.sweeps), (3, 3), "{r:?}");
     }
@@ -201,7 +225,7 @@ fn a_speaker_that_sleeps_after_silence_still_plays_its_first_sweep() {
 }
 
 #[test]
-fn another_nodes_microphones_can_be_listed() {
+fn remote_microphones_load_and_refresh_without_ui_commands() {
     let a = spawn("a", FakeClock::default(), |_| {});
     let b = spawn_linked("b", FakeClock::default(), &[&a], |h| {
         h.add_mic("USB Mic", 0);
@@ -209,10 +233,28 @@ fn another_nodes_microphones_can_be_listed() {
     });
     let b_id = id(&b);
     assert!(wait_until(Duration::from_secs(5), || a.engine.status().peers.iter().any(|p| p.id == b_id)));
-    a.engine.command(Command::ListInputs(b_id));
     let inputs = || a.engine.status().peers.iter().find(|p| p.id == b_id).and_then(|p| p.inputs.clone());
     assert!(wait_until(Duration::from_secs(3), || inputs().is_some()));
     assert_eq!(inputs().unwrap(), InputList { default: Some("USB Mic".into()), devices: vec!["USB Mic".into(), "Line In".into()] });
+    assert!(wait_until(Duration::from_secs(3), || b.engine.status().peers.iter().any(|p| p.id == id(&a) && p.inputs == Some(InputList::default()))));
+    // Even a host without device notifications is refreshed, with no visible UI or selection.
+    b.host.add_mic("New Mic", 0);
+    assert!(wait_until(Duration::from_secs(7), || inputs().is_some_and(|list| list.devices.contains(&"New Mic".to_string()))));
+    b.shutdown();
+    a.shutdown();
+}
+
+#[test]
+fn remote_microphone_discovery_retries_after_packet_loss() {
+    let a = spawn("a", FakeClock::default(), |_| {});
+    let b = spawn_with(
+        Spec { peers: &[&a], impair: Some(soundsync_engine::NetImpair { loss: 0.5, seed: 41, ..Default::default() }), ..Spec::new("b") },
+        |_| {},
+        |h| h.add_mic("USB Mic", 0),
+    );
+    assert!(wait_until(Duration::from_secs(10), || a.engine.status().peers.iter().any(|p| {
+        p.id == id(&b) && p.inputs.as_ref().is_some_and(|list| list.devices == ["USB Mic"])
+    })), "discovery must retry without any UI commands");
     b.shutdown();
     a.shutdown();
 }
@@ -223,10 +265,10 @@ fn calibration_fails_cleanly_without_signal() {
     let nodes = room_setup(&room);
     nodes[2].engine.command(Command::SetVolume(0.0));
     let mic_node = id(&nodes[0]);
-    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: false });
-    assert!(wait_until(Duration::from_secs(16), || matches!(nodes[0].engine.status().calibration, CalibStatus::Failed(_))));
+    nodes[0].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), kind: CalibKind::Latency, check: false });
+    assert!(wait_until(Duration::from_secs(16), || matches!(nodes[0].engine.status().calibration, CalibStatus::Failed { .. })));
     match &nodes[0].engine.status().calibration {
-        CalibStatus::Failed(msg) => assert!(msg.contains("no signal from n2"), "{msg}"),
+        CalibStatus::Failed { message, .. } => assert!(message.contains("no signal from n2"), "{message}"),
         other => panic!("{other:?}"),
     }
     assert!(wait_until(Duration::from_secs(3), || nodes.iter().all(|n| !n.engine.status().streams_paused)));
@@ -236,15 +278,33 @@ fn calibration_fails_cleanly_without_signal() {
 }
 
 #[test]
-fn remote_mic_node_runs_calibration() {
+fn remote_mic_node_preserves_volume_calibration_kind() {
     let room = FakeRoom::new(48_000);
     let nodes = room_setup(&room);
     let mic_node = id(&nodes[0]);
-    nodes[2].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), check: false });
-    assert!(wait_until(Duration::from_secs(18), || matches!(nodes[2].engine.status().calibration, CalibStatus::Done { .. })), "{:?}", nodes[2].engine.status().calibration);
+    nodes[2].host.set_endpoint_volume(&spk(), 0.5).unwrap();
+    nodes[2].engine.command(Command::StartCalibration { mic_node, mic_device: "Mic".into(), kind: CalibKind::Volume, check: false });
+    assert!(wait_until(Duration::from_secs(18), || nodes.iter().all(|n| matches!(n.engine.status().calibration, CalibStatus::Done { kind: CalibKind::Volume, .. }))), "{:?}", nodes[2].engine.status().calibration);
+    apply_calibration(&nodes[2], CalibKind::Volume);
+    let quietest = nodes[2].host.endpoint_volume(&spk()).unwrap().db;
+    assert!(wait_until(Duration::from_secs(3), || nodes.iter().all(|n| (n.host.endpoint_volume(&spk()).unwrap().db - quietest).abs() < 0.3)));
+    assert!(nodes.iter().all(|n| extra_of(n) == 0));
     for n in nodes.into_iter().rev() {
         n.shutdown();
     }
+}
+
+#[test]
+fn remote_microphone_open_failure_reaches_the_requester() {
+    let a = spawn("a", FakeClock::default(), |_| {});
+    let b = spawn_linked("b", FakeClock::default(), &[&a], |_| {});
+    assert!(wait_until(Duration::from_secs(5), || a.engine.status().peers.len() == 1));
+    a.engine.command(Command::StartCalibration { mic_node: id(&b), mic_device: "Missing Mic".into(), kind: CalibKind::Volume, check: false });
+    assert!(wait_until(Duration::from_secs(3), || matches!(&a.engine.status().calibration,
+        CalibStatus::Failed { kind: CalibKind::Volume, message } if message.contains("cannot open microphone"))));
+    assert!(!a.engine.status().streams_paused && !b.engine.status().streams_paused);
+    b.shutdown();
+    a.shutdown();
 }
 
 #[test]

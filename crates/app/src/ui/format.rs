@@ -1,5 +1,6 @@
 //! Text shown in the window and tray.
 
+use soundsync_core::calib::CalibKind;
 use soundsync_core::player::PlayState;
 use soundsync_core::{MasterMode, Nanos, Role};
 use soundsync_engine::{Status, StreamStatus};
@@ -36,17 +37,21 @@ pub fn fmt_level(db: f32) -> String {
 
 /// Note for one device's calibration result and whether it looks good. A check run (`check`)
 /// shows what is left, which is fine within the 1 ms and 1 dB people notice.
-pub fn calib_note(r: &soundsync_core::calib::CalibResult, check: bool) -> (String, bool) {
+pub fn calib_note(r: &soundsync_core::calib::CalibResult, kind: CalibKind, check: bool) -> (String, bool) {
     let mut notes = Vec::new();
-    if check && r.delta_ns.abs() > 1_000_000 {
-        notes.push(format!("off by {:.1} ms (Correct these fixes it)", r.delta_ns.abs() as f64 / 1e6));
+    if check && kind == CalibKind::Latency && r.delta_ns.abs() > 1_000_000 {
+        notes.push(format!("off by {:.1} ms (Apply latency fixes it)", r.delta_ns.abs() as f64 / 1e6));
     }
-    if check && r.level_db > 1.0 {
-        notes.push(format!("{:.1} dB louder (Correct these turns it down)", r.level_db));
+    if check && kind == CalibKind::Volume && r.level_db > 1.0 {
+        notes.push(format!("{:.1} dB louder (Apply volume turns it down)", r.level_db));
     }
-    notes.extend(r.problems());
+    notes.extend(r.problems(kind));
     if notes.is_empty() {
-        return ((if check { "✓ in sync" } else { "✓" }).into(), true);
+        return ((match (kind, check) {
+            (_, false) => "✓",
+            (CalibKind::Latency, true) => "✓ in sync",
+            (CalibKind::Volume, true) => "✓ matched",
+        }).into(), true);
     }
     (notes.join("; "), false)
 }
@@ -170,11 +175,13 @@ mod tests {
         assert_eq!(fmt_level(4.06), "+4.1 dB");
         // A check: within 1 dB counts as matched, like 1 ms for timing.
         let louder = soundsync_core::calib::CalibResult { level_db: 2.4, ..result(0.2, 40.0, 0.0, 1, 1) };
-        assert_eq!(calib_note(&louder, true), ("2.4 dB louder (Correct these turns it down)".to_string(), false));
+        assert_eq!(calib_note(&louder, CalibKind::Volume, true), ("2.4 dB louder (Apply volume turns it down)".to_string(), false));
+        assert_eq!(calib_note(&louder, CalibKind::Latency, true), ("✓ in sync".to_string(), true));
         let close = soundsync_core::calib::CalibResult { level_db: 0.8, ..result(0.2, 40.0, 0.0, 1, 1) };
-        assert_eq!(calib_note(&close, true), ("✓ in sync".to_string(), true));
+        assert_eq!(calib_note(&close, CalibKind::Volume, true), ("✓ matched".to_string(), true));
         // In a calibration the Level column says it; Apply turns it down.
-        assert_eq!(calib_note(&louder, false), ("✓".to_string(), true));
+        assert_eq!(calib_note(&louder, CalibKind::Volume, false), ("✓".to_string(), true));
+        assert_eq!(calib_note(&result(25.0, 40.0, 2.0, 3, 3), CalibKind::Volume, true), ("✓ matched".to_string(), true));
     }
 
     #[test]
@@ -182,12 +189,12 @@ mod tests {
         assert_eq!(fmt_snr(41.6), "42 dB");
         assert_eq!(fmt_snr(f32::INFINITY), "> 60 dB");
         // Calibration: corrections with their doubts.
-        assert_eq!(calib_note(&result(12.0, 41.0, 0.1, 3, 3), false), ("✓".to_string(), true));
-        assert_eq!(calib_note(&result(12.0, 24.0, 2.0, 2, 3), false), ("heard 2 of 3 sweeps; sweeps disagree by 2.0 ms; weak signal (24 dB)".to_string(), false));
+        assert_eq!(calib_note(&result(12.0, 41.0, 0.1, 3, 3), CalibKind::Latency, false), ("✓".to_string(), true));
+        assert_eq!(calib_note(&result(12.0, 24.0, 2.0, 2, 3), CalibKind::Latency, false), ("heard 2 of 3 sweeps; sweeps disagree by 2.0 ms; weak signal (24 dB)".to_string(), false));
         // Check run: what is left.
-        assert_eq!(calib_note(&result(0.4, 40.0, 0.0, 1, 1), true), ("✓ in sync".to_string(), true));
-        assert_eq!(calib_note(&result(-2.5, 40.0, 0.0, 1, 1), true), ("off by 2.5 ms (Correct these fixes it)".to_string(), false));
-        assert_eq!(calib_note(&result(-2.5, 22.0, 0.0, 1, 1), true), ("off by 2.5 ms (Correct these fixes it); weak signal (22 dB)".to_string(), false));
+        assert_eq!(calib_note(&result(0.4, 40.0, 0.0, 1, 1), CalibKind::Latency, true), ("✓ in sync".to_string(), true));
+        assert_eq!(calib_note(&result(-2.5, 40.0, 0.0, 1, 1), CalibKind::Latency, true), ("off by 2.5 ms (Apply latency fixes it)".to_string(), false));
+        assert_eq!(calib_note(&result(-2.5, 22.0, 0.0, 1, 1), CalibKind::Latency, true), ("off by 2.5 ms (Apply latency fixes it); weak signal (22 dB)".to_string(), false));
     }
     use soundsync_core::player::PlayState;
     use soundsync_core::protocol::RxStat;

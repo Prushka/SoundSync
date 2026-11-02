@@ -25,6 +25,8 @@ pub struct Peer {
     pub state: Option<NodeState>,
     /// Its microphones, from its last `Inputs` answer.
     pub inputs: Option<InputList>,
+    /// Engine-owned polling: device lists must not depend on a visible Sync tab.
+    pub next_inputs: Nanos,
     pub next_ping: Nanos,
 }
 
@@ -75,6 +77,7 @@ impl PeerTable {
                         clock: ClockEstimator::new(),
                         state: None,
                         inputs: None,
+                        next_inputs: now,
                         next_ping: now,
                     },
                 );

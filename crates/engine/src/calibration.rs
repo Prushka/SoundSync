@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use soundsync_audio::{CaptureInfo, CaptureSink, DeviceSelector, Stream, StreamFormat};
 use soundsync_core::calib::{CalibReference, calibration_results, calibration_sweep, find_signal, wake_noise};
-use soundsync_core::calib::{CalibResult, Heard, Sweeps};
+use soundsync_core::calib::{CalibKind, CalibResult, Heard, Sweeps};
 use soundsync_core::protocol::{CalibMsg, CalibSignal, Control, VolumeChange};
 use soundsync_core::{MasterMode, Nanos, NodeId, Role};
 
@@ -60,6 +60,7 @@ pub(crate) struct CalibRun {
     slots: Vec<(NodeId, Nanos)>,
     until: Nanos,
     reference: CalibReference,
+    kind: CalibKind,
     check: bool,
 }
 
@@ -74,6 +75,7 @@ pub(crate) struct CalibState {
     pub run: Option<CalibRun>,
     pub participant: Option<Participant>,
     pub status: CalibStatus,
+    pub stale_apply: bool,
 }
 
 impl Node {
@@ -96,7 +98,8 @@ impl Node {
             .map_or(CalibReference::Median, |p| CalibReference::Node(p.id))
     }
 
-    pub(crate) fn start_calibration(&mut self, mic_device: &str, check: bool) {
+    pub(crate) fn start_calibration(&mut self, mic_device: &str, kind: CalibKind, check: bool) {
+        self.calib.stale_apply = false;
         if self.calib.run.is_some() {
             return;
         }
@@ -109,7 +112,7 @@ impl Node {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("calibration: cannot open microphone {mic_device}: {e}");
-                self.calib.status = CalibStatus::Failed(format!("cannot open microphone {mic_device}: {e}"));
+                self.calib.status = CalibStatus::Failed { kind, message: format!("cannot open microphone {mic_device}: {e}") };
                 return;
             }
         };
@@ -124,7 +127,7 @@ impl Node {
             .map(|k| (nodes[k % nodes.len()].0, now + FIRST_SLOT_NS + k as Nanos * SLOT_SPACING_NS))
             .collect();
         let until = slots.last().map_or(now, |s| s.1) + TAIL_NS;
-        let begin = Control::Calib(CalibMsg::Begin { session, until_ns: until });
+        let begin = Control::Calib(CalibMsg::Begin { session, until_ns: until, kind });
         let wake = Control::Calib(CalibMsg::Play { session, at_ns: now + WAKE_AT_NS, signal: CalibSignal::Wake });
         for p in self.peers.iter() {
             self.send(p.addr, &begin);
@@ -142,18 +145,18 @@ impl Node {
                 self.send(p.addr, &Control::Calib(CalibMsg::Play { session, at_ns: *at, signal: CalibSignal::Sweep }));
             }
         }
-        let kind = if check { "check" } else { "calibration" };
-        tracing::info!("{kind} {session:08x}: {} speakers × {sweeps} sweeps, results in {:.1} s", nodes.len(), (until - now) as f64 / 1e9);
-        self.calib.status = CalibStatus::Running { step: 0, total: slots.len() };
+        let action = if check { "check" } else { "calibration" };
+        tracing::info!("{kind:?} {action} {session:08x}: {} speakers × {sweeps} sweeps, results in {:.1} s", nodes.len(), (until - now) as f64 / 1e9);
+        self.calib.status = CalibStatus::Running { kind, step: 0, total: slots.len() };
         let reference = self.calibration_reference();
-        self.calib.run = Some(CalibRun { session, _mic: mic, rec, nodes, slots, until, reference, check });
+        self.calib.run = Some(CalibRun { session, _mic: mic, rec, nodes, slots, until, reference, kind, check });
         self.update_paused();
     }
 
     pub(crate) fn calibration_tick(&mut self, now: Nanos) {
         if let Some(run) = &self.calib.run {
             let done = run.slots.iter().filter(|s| s.1 + WINDOW_AFTER_NS < now).count();
-            self.calib.status = CalibStatus::Running { step: done, total: run.slots.len() };
+            self.calib.status = CalibStatus::Running { kind: run.kind, step: done, total: run.slots.len() };
             if now >= run.until {
                 self.finish_calibration();
             }
@@ -241,20 +244,21 @@ impl Node {
                 r.peak_dbfs
             );
         }
-        let msg = Control::Calib(CalibMsg::Result { session: run.session, results: results.clone(), check: run.check, error: error.clone() });
+        let msg = Control::Calib(CalibMsg::Result { session: run.session, results: results.clone(), kind: run.kind, check: run.check, error: error.clone() });
         let end = Control::Calib(CalibMsg::End { session: run.session });
         for p in self.peers.iter() {
             self.send(p.addr, &msg);
             self.send(p.addr, &end);
         }
         self.calib.status = match error {
-            Some(e) => CalibStatus::Failed(e),
-            None => CalibStatus::Done { session: run.session, results, check: run.check },
+            Some(message) => CalibStatus::Failed { kind: run.kind, message },
+            None => CalibStatus::Done { session: run.session, results, kind: run.kind, check: run.check },
         };
         self.update_paused();
     }
 
     pub(crate) fn cancel_calibration(&mut self) {
+        self.calib.stale_apply = false;
         if let Some(run) = self.calib.run.take() {
             let end = Control::Calib(CalibMsg::End { session: run.session });
             for p in self.peers.iter() {
@@ -266,20 +270,33 @@ impl Node {
         self.update_paused();
     }
 
-    /// Adds each measured delta to the node's current extra latency; with `match_volumes`, also
-    /// turns every speaker down to the quietest one's level.
-    pub(crate) fn apply_calibration(&mut self, match_volumes: bool) {
-        let CalibStatus::Done { results, .. } = self.calib.status.clone() else { return };
+    /// Applies only the run's chosen correction. A volume run never writes offsets; a latency
+    /// run never writes output volume, even though both use the same measurement sweeps.
+    pub(crate) fn apply_calibration(&mut self, session: u32, kind: CalibKind) {
+        // The UI uses a snapshot. A delayed result or a new run can replace it before the
+        // command arrives; never apply corrections other than the ones the user reviewed.
+        if !matches!(self.calib.status, CalibStatus::Done { session: s, kind: k, .. } if s == session && k == kind) {
+            self.calib.stale_apply = true;
+            return;
+        }
+        self.calib.stale_apply = false;
+        let CalibStatus::Done { results, .. } = self.calib.status.clone() else { unreachable!() };
         for r in &results {
-            if r.node == self.id() {
-                let cur = self.config.extra_latency_ns();
-                self.set_own_extra_latency(cur + r.delta_ns);
-            } else if let Some(p) = self.peers.get(r.node) {
-                let cur = p.state.as_ref().map_or(0, |s| s.extra_latency_ns);
-                self.send(p.addr, &Control::SetOffset { target: r.node, extra_latency_ns: cur + r.delta_ns });
-            }
-            if match_volumes && r.level_db >= MIN_TURN_DOWN_DB {
-                self.change_volume(r.node, VolumeChange::TurnDown { db: r.level_db });
+            match kind {
+                CalibKind::Latency => {
+                    if r.node == self.id() {
+                        let cur = self.config.extra_latency_ns();
+                        self.set_own_extra_latency(cur + r.delta_ns);
+                    } else if let Some(p) = self.peers.get(r.node) {
+                        let cur = p.state.as_ref().map_or(0, |s| s.extra_latency_ns);
+                        self.send(p.addr, &Control::SetOffset { target: r.node, extra_latency_ns: cur + r.delta_ns });
+                    }
+                }
+                CalibKind::Volume => {
+                    if r.level_db >= MIN_TURN_DOWN_DB {
+                        self.change_volume(r.node, VolumeChange::TurnDown { db: r.level_db });
+                    }
+                }
             }
         }
         self.calib.status = CalibStatus::Idle;
@@ -287,11 +304,20 @@ impl Node {
 
     pub(crate) fn handle_calib(&mut self, sender: NodeId, msg: CalibMsg, now: Nanos) {
         match msg {
-            CalibMsg::Request { mic_device, check } => self.start_calibration(&mic_device, check),
-            CalibMsg::Begin { session, until_ns } => {
+            CalibMsg::Request { mic_device, kind, check } => {
+                self.start_calibration(&mic_device, kind, check);
+                // Opening a remote mic can fail before Begin. Return that error to the caller
+                // instead of leaving its window on Running forever.
+                if let CalibStatus::Failed { message, .. } = &self.calib.status
+                    && let Some(p) = self.peers.get(sender)
+                {
+                    self.send(p.addr, &Control::Calib(CalibMsg::Result { session: 0, results: Vec::new(), kind, check, error: Some(message.clone()) }));
+                }
+            }
+            CalibMsg::Begin { session, until_ns, kind } => {
                 let until_local = self.peers.get(sender).and_then(|p| p.clock_map()).map_or(now + 10_000_000_000, |m| m.remote_to_local(until_ns));
                 self.calib.participant = Some(Participant { coordinator: sender, session, until_local });
-                self.calib.status = CalibStatus::Running { step: 0, total: self.peers.len() + 1 };
+                self.calib.status = CalibStatus::Running { kind, step: 0, total: self.peers.len() + 1 };
                 self.update_paused();
             }
             CalibMsg::Play { session, at_ns, signal: signal @ (CalibSignal::Sweep | CalibSignal::Wake) } => {
@@ -309,10 +335,10 @@ impl Node {
                     self.update_paused();
                 }
             }
-            CalibMsg::Result { session, results, check, error } => {
+            CalibMsg::Result { session, results, kind, check, error } => {
                 self.calib.status = match error {
-                    Some(e) => CalibStatus::Failed(e),
-                    None => CalibStatus::Done { session, results, check },
+                    Some(message) => CalibStatus::Failed { kind, message },
+                    None => CalibStatus::Done { session, results, kind, check },
                 };
             }
         }

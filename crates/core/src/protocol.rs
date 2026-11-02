@@ -14,12 +14,12 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::calib::CalibResult;
+use crate::calib::{CalibKind, CalibResult};
 use crate::types::{MasterMode, Nanos, NodeId, Os, Role, StreamFormat};
 
 pub const MAGIC: [u8; 4] = *b"SSYN";
-/// 2: volumes in node state, remote volume, microphone lists, levels in calibration results.
-pub const PROTOCOL_VERSION: u8 = 2;
+/// 3: separate latency and volume calibration kinds in requests, sessions and results.
+pub const PROTOCOL_VERSION: u8 = 3;
 pub const HEADER_LEN: usize = 14;
 pub const AUDIO_HEADER_LEN: usize = 49;
 pub const TAG_LEN: usize = 8;
@@ -165,11 +165,11 @@ pub enum CalibSignal {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CalibMsg {
     /// `check`: one sweep per device, to measure what is left after applying corrections.
-    Request { mic_device: String, check: bool },
-    Begin { session: u32, until_ns: Nanos },
+    Request { mic_device: String, kind: CalibKind, check: bool },
+    Begin { session: u32, until_ns: Nanos, kind: CalibKind },
     Play { session: u32, at_ns: Nanos, signal: CalibSignal },
     End { session: u32 },
-    Result { session: u32, results: Vec<CalibResult>, check: bool, error: Option<String> },
+    Result { session: u32, results: Vec<CalibResult>, kind: CalibKind, check: bool, error: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -533,8 +533,10 @@ mod tests {
             Control::SetVolume { target: 42, change: VolumeChange::TurnDown { db: 4.5 } },
             Control::ListInputs,
             Control::Inputs(InputList { default: Some("MacBook Pro Microphone".into()), devices: vec!["MacBook Pro Microphone".into(), "AirPods".into()] }),
-            Control::Calib(CalibMsg::Request { mic_device: "Microphone".into(), check: true }),
-            Control::Calib(CalibMsg::Begin { session: 1, until_ns: 10 }),
+            Control::Calib(CalibMsg::Request { mic_device: "Microphone".into(), kind: CalibKind::Latency, check: true }),
+            Control::Calib(CalibMsg::Request { mic_device: "Microphone".into(), kind: CalibKind::Volume, check: false }),
+            Control::Calib(CalibMsg::Begin { session: 1, until_ns: 10, kind: CalibKind::Latency }),
+            Control::Calib(CalibMsg::Begin { session: 2, until_ns: 10, kind: CalibKind::Volume }),
             Control::Calib(CalibMsg::Play { session: 1, at_ns: 11, signal: CalibSignal::Sweep }),
             Control::Calib(CalibMsg::Play { session: 1, at_ns: 12, signal: CalibSignal::Click { freq_hz: 800 } }),
             Control::Calib(CalibMsg::Play { session: 1, at_ns: 13, signal: CalibSignal::Wake }),
@@ -545,6 +547,7 @@ mod tests {
                     CalibResult { node: 1, delta_ns: -35_000_000, snr_db: 41.5, spread_ns: 120_000, heard: 3, sweeps: 3, level_db: 0.0, peak_dbfs: -12.5, level_spread_db: 0.4 },
                     CalibResult { node: 2, delta_ns: 145_000_000, snr_db: 27.0, spread_ns: 0, heard: 1, sweeps: 3, level_db: 4.5, peak_dbfs: -3.1, level_spread_db: 0.0 },
                 ],
+                kind: CalibKind::Volume,
                 check: false,
                 error: Some("no signal from TV".into()),
             }),
@@ -603,7 +606,7 @@ mod tests {
             Control::SetVolume { target: 1, change: VolumeChange::Set(f32::NAN) },
             Control::SetVolume { target: 1, change: VolumeChange::TurnDown { db: -3.0 } },
             Control::SetVolume { target: 1, change: VolumeChange::TurnDown { db: f32::INFINITY } },
-            Control::Calib(CalibMsg::Result { session: 1, results: vec![calib_result(f32::NAN)], check: false, error: None }),
+            Control::Calib(CalibMsg::Result { session: 1, results: vec![calib_result(f32::NAN)], kind: CalibKind::Latency, check: false, error: None }),
         ] {
             let n = encode(5, &Packet::Control(control.clone()), &key, &mut buf).unwrap();
             assert_eq!(decode(&buf[..n], &key), Err(DecodeError::Malformed), "{control:?}");
@@ -621,14 +624,16 @@ mod tests {
 
     #[test]
     fn another_protocol_version_is_reported_as_such() {
-        // Version 1 (before volumes and microphone lists) cannot be read: say so instead of
-        // failing as a corrupt packet, so the user can be told to update.
+        // Older versions cannot distinguish latency runs from volume runs. Reject them clearly
+        // instead of allowing an old client to apply both corrections to a volume-only result.
         let key = GroupKey::derive("home", "");
         let mut buf = [0u8; MAX_DATAGRAM];
         let n = encode(5, &Packet::Control(Control::Ping { t1: 1 }), &key, &mut buf).unwrap();
-        assert_eq!(PROTOCOL_VERSION, 2);
-        buf[4] = 1;
-        assert_eq!(decode(&buf[..n], &key), Err(DecodeError::BadVersion(1)));
+        assert_eq!(PROTOCOL_VERSION, 3);
+        for old in [1, 2] {
+            buf[4] = old;
+            assert_eq!(decode(&buf[..n], &key), Err(DecodeError::BadVersion(old)));
+        }
     }
 
     #[test]

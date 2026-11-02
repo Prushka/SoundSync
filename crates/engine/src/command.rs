@@ -1,5 +1,6 @@
 //! Commands from the UI (or tests) to the engine. Each one also updates the saved config.
 
+use soundsync_core::calib::CalibKind;
 use soundsync_core::delay::DelaySetting;
 use soundsync_core::protocol::VolumeChange;
 use soundsync_core::{MasterMode, Nanos, NodeId};
@@ -24,10 +25,10 @@ pub enum Command {
     SetSwitchDefault(bool),
     SyncTest(bool),
     /// `check`: a quick run (one sweep per device) that only measures what is left.
-    StartCalibration { mic_node: NodeId, mic_device: String, check: bool },
-    /// Applies the measured corrections; `match_volumes` also turns louder speakers down.
-    ApplyCalibration { match_volumes: bool },
+    StartCalibration { mic_node: NodeId, mic_device: String, kind: CalibKind, check: bool },
+    /// Applies the displayed result only if both its session and kind still match.
+    ApplyCalibration { session: u32, kind: CalibKind },
     CancelCalibration,
-    /// Asks a peer for its microphones (they show up in its `PeerStatus::inputs`).
+    /// Refreshes a peer's microphones now (also refreshed automatically by the engine).
     ListInputs(NodeId),
 }

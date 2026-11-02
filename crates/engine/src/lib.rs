@@ -1,6 +1,6 @@
 //! A SoundSync node without UI: discovery, clock sync, streaming and calibration.
 //!
-//! [`Engine::start`] spawns the network receive thread and the engine thread; the UI drives it
+//! [`Engine::start`] spawns network, engine and microphone inventory workers; the UI drives it
 //! with [`Command`]s and reads [`Status`] snapshots.
 
 pub mod chunk;
@@ -18,6 +18,7 @@ mod streams;
 
 mod calibration;
 mod devices;
+mod inputs;
 mod node;
 mod power;
 mod synctest;
@@ -81,6 +82,7 @@ impl Engine {
         let status = Arc::new(ArcSwap::from_pointee(Status::default()));
         let stop = Arc::new(AtomicBool::new(false));
 
+        let inputs = inputs::InputInventory::spawn(o.host.clone()).context("spawn microphone inventory worker")?;
         let rx_thread = net::spawn_rx(transport.clone(), o.host.clone(), inbound_tx, routes_rx, counters.clone());
         let mut node = node::Node::new(
             config,
@@ -91,6 +93,7 @@ impl Engine {
             status.clone(),
             routes_tx.clone(),
             counters,
+            inputs,
         );
         if let (Some(api), Some(state_path)) = (o.default_devices, o.state_path.clone()) {
             // Crash recovery runs on the engine thread (it uses COM; see node::run).

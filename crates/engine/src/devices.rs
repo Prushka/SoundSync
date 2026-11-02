@@ -46,6 +46,9 @@ impl Node {
     pub(crate) fn devices_tick(&mut self, now: Nanos) {
         let events: Vec<DeviceEvent> = self.device_events.as_ref().map_or_else(Vec::new, |rx| rx.try_iter().collect());
         self.device_event_count += events.len() as u64;
+        if !events.is_empty() {
+            self.inputs.invalidate();
+        }
         let mut follow_default = false;
         for e in events {
             match e {

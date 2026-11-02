@@ -215,22 +215,29 @@ the **Overview** group table.
 - **Sync test** (Sync tab): every speaker clicks once a second at the same moment, each at its own pitch.
   Adjust the extra latencies until the clicks sound like one. A speaker that clicks late needs a larger value.
 - **Auto-calibrate with a microphone** (Sync tab): choose any device in the group, then one of its
-  microphones, and place it where you listen (speakers are aligned for that spot; sound travels about 34 cm
-  per millisecond). **Start**: every speaker plays a soft "shh" first (TVs and soundbars mute after a while of
-  silence and would swallow the first sweep), then the speakers take turns playing a short sweep, three times
-  each. SoundSync finds when each sweep arrived (the earliest strong arrival, so a louder reflection off a wall
-  does not count) and how loud it was, takes each speaker's median, and shows the corrections, each speaker's
-  **Level** (how much louder than the quietest speaker it arrived) and its signal strength.
-  **Apply** adds the corrections to the extra latencies and, with **Also match volumes** (on by default),
-  turns every louder speaker down by its Level using that speaker's own volume, so all of them are as loud as
-  the quietest one. **Check** then plays one sweep per speaker and shows what is left (within 1 ms and 1 dB is
-  in sync); **Correct these** applies that too.
+  microphones, and place it where you listen (sound travels about 34 cm per millisecond). Connected devices'
+  microphone lists load and refresh automatically, even while the window is hidden. No approval on the other
+  device is needed to see its list. Choose a physical microphone that can hear the room, rather than a virtual
+  cable input. Latency and volume have separate controls and results:
 
-  A speaker is flagged when its sweeps disagree by more than 1 ms, when one was not heard, when the signal is
-  weak (below 30 dB), when the microphone was overloaded (peaks above -6 dBFS), or when a speaker's level
-  varied by more than 2 dB between sweeps. The last one is typical of webcams and cameras: their microphones
+  - **Calibrate latency** measures when each speaker is heard. **Apply latency** adds the measured corrections
+    to the speakers' extra latencies and leaves their volumes unchanged. **Check latency** measures the remaining
+    timing differences; within 1 ms is in sync.
+  - **Calibrate volume** measures loudness at the microphone. **Apply volume** turns louder speakers down to
+    the quietest one using each speaker's own volume and leaves all extra latencies unchanged. **Check volume**
+    measures the remaining loudness differences; within 1 dB is matched.
+
+  Either calibration starts with a soft "shh" to wake TVs and soundbars that mute after silence, followed by
+  three short sweeps per speaker. SoundSync uses each speaker's median measurement. A check plays one sweep per
+  speaker, and its corresponding **Apply latency** or **Apply volume** applies that correction too. Only one
+  calibration runs at a time. All devices must run the updated version: the network protocol distinguishes
+  latency and volume runs so another device cannot accidentally apply both.
+
+  Both calibrations flag missing sweeps, weak signals (below 30 dB) and microphone overload (peaks above
+  -6 dBFS). Latency results also flag sweeps that disagree by more than 1 ms; volume results flag levels
+  that vary by more than 2 dB between sweeps. The last one is typical of webcams and cameras: their microphones
   adjust their own gain, which squeezes level differences (one measured a 10.5 dB step as 7 dB). Matching then
-  turns speakers down too little, never too much: run **Check** and **Correct these** again until the levels
+  turns speakers down too little, never too much: run **Check volume** and **Apply volume** again until the levels
   are within 1 dB, or use a microphone without automatic gain. The microphone's own delay and level cancel out,
   since every speaker is measured through it. Bluetooth headset microphones change the headset's own latency
   while they are in use; use another one.
@@ -273,3 +280,8 @@ number and commit as their version; local builds show `(dev)`.
 For local testing, `--config <file>` (or `--instance <name>`) runs a second instance with its own settings;
 `soundsync devices` lists audio devices with their formats and layouts, and `soundsync run` runs a node
 without a window.
+
+To diagnose a remote microphone list without recording or changing audio settings, run
+`cargo run -p soundsync-engine --example remote_inputs -- <peer-ip>:47810` (optionally followed by a config
+file path). It reports the peer's version and connected inputs, or times out with a specific handshake/list
+failure. It uses the same group and key as the local app.
