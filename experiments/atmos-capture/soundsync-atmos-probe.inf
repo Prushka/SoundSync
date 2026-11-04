@@ -1,0 +1,86 @@
+; HDMI-only research endpoint derived from Microsoft's MS-PL-licensed SysVAD sample.
+; Copyright (c) Microsoft Corporation. All Rights Reserved.
+; This package is unsigned. Building it does not install it.
+[Version]
+Signature="$Windows NT$"
+Class=MEDIA
+ClassGUID={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+DriverVer=11/03/2026,0.0.1.0
+CatalogFile=soundsync-atmos-probe.cat
+PnpLockDown=1
+
+[Manufacturer]
+%Provider%=Models,NTamd64.10.0...22621
+[Models.NTamd64.10.0...22621]
+%Device%=Install,Root\SoundSyncAtmosProbe
+
+[SourceDisksNames]
+1="SoundSync Atmos capture experiment"
+[SourceDisksFiles]
+soundsync-atmos-probe.sys=1
+[DestinationDirs]
+DriverCopy=13
+[DriverCopy]
+soundsync-atmos-probe.sys
+
+[Install.NT]
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration,WDMAUDIO.Registration
+CopyFiles=DriverCopy
+
+[Install.NT.Interfaces]
+AddInterface=%Audio%,"WaveHdmi",Wave
+AddInterface=%Render%,"WaveHdmi",Wave
+AddInterface=%Realtime%,"WaveHdmi",Wave
+AddInterface=%Audio%,"TopologyHdmi",Topology
+AddInterface=%TopologyCategory%,"TopologyHdmi",Topology
+[Wave]
+AddReg=Wave.Reg
+[Wave.Reg]
+HKR,,CLSID,,%Proxy%
+HKR,,FriendlyName,,%Device%
+[Topology]
+AddReg=Topology.Reg
+[Topology.Reg]
+HKR,,CLSID,,%Proxy%
+HKR,,FriendlyName,,%Device%
+HKR,EP\0,%Association%,,%AnyNode%
+HKR,EP\0,%EventDriven%,0x00010001,1
+
+[Install.NT.Services]
+AddService=SoundSyncAtmosProbe,0x00000002,Service
+[Service]
+DisplayName=%Device%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\soundsync-atmos-probe.sys
+AddReg=Parameters
+[Parameters]
+HKR,Parameters,DoNotCreateDataFiles,0x00010001,1
+HKR,Parameters,DisableBthScoBypass,0x00010001,1
+HKR,Parameters,DisableUsbSideband,0x00010001,1
+
+[Install.NT.HW]
+AddReg=Hardware
+[Hardware]
+HKR,,DeviceType,0x00010001,0x1d
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGWGX;;;RC)"
+
+[Install.NT.Wdf]
+KmdfService=SoundSyncAtmosProbe,Wdf
+[Wdf]
+KmdfLibraryVersion=1.15
+
+[Strings]
+Provider="SoundSync experimental development"
+Device="SoundSync Atmos Probe (experimental)"
+Proxy="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+Audio="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+Render="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+Realtime="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+TopologyCategory="{DDA54A40-1E4C-11D1-A050-405705C10000}"
+AnyNode="{00000000-0000-0000-0000-000000000000}"
+Association="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
+EventDriven="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"

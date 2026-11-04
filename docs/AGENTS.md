@@ -36,6 +36,7 @@ SoundSync is LAN multi-room audio written in Rust.
 | `.github/workflows/build.yml` | CI on `windows-latest` and `macos-latest`: test (one at a time), clippy `-D warnings`, package, upload artifacts. On pushes to `main` that pass, a `release` job publishes a GitHub release with both zips. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Original design and 27-task plan (2026-10-30/31), the volume-matching design (2026-10-31), and the self-update design and plan (2026-11-01). |
 | `.superpowers/sdd/2026-10-31-soundsync/` | **Local only** (git-ignored by its own `.gitignore`): the build ledger `progress.md` and PowerShell helper scripts (see [Real-hardware testing](#real-hardware-testing)). |
+| `experiments/atmos-capture/` | Isolated SysVAD-based HDMI/MAT capture prototype without a production signature, native reader and regressions. See its README. Upstream SysVAD is MS-PL; its license is bundled. No driver has been installed and no encoded network/playback path exists. |
 
 ## Build, test and run
 
@@ -82,6 +83,13 @@ Before calling a change done, run these, all green:
 
 The project does **not** use rustfmt: there is no `rustfmt.toml`, lines run to about 160 characters, and CI
 doesn't check formatting. Never run `cargo fmt` on the tree; match the surrounding style by hand.
+
+The Atmos capture experiment has separate Windows-only native checks:
+`pwsh experiments/atmos-capture/build.ps1`. This downloads pinned Microsoft build packages under
+`target/`, builds an unsigned driver and reader, runs native regressions, validates the INF and catalog,
+and packages the results under `dist/`. It installs nothing and changes no system settings. Do not
+interpret build success as Dolby activation or receiver compatibility; loading a development driver,
+test-signing policy changes and any reboot need explicit authorization.
 
 Useful runtime commands:
 
@@ -530,6 +538,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Cover microphone refresh retries across polling cycles" | Allow the automatic inventory refresh check to span a missed UDP response and a cached reply. Add controlled failure/recovery coverage proving that new microphones appear on the next refresh while the last good list remains visible. No production polling changes. |
 | "Update other devices from the Overview group" | Add individual and bulk remote updates to the latest release, with builds, progress and errors in Group. Use independently versioned, authenticated management messages on the existing UDP socket so future audio protocol mismatches remain remotely repairable. Require one local update for legacy installations. Verify cross-protocol requests, group authentication, session/request deduplication, timeouts, restart build confirmation and the existing download checks; inspect the controls with silent loopback fixtures. |
 | "Fix remote update retries, restart tracking and CI build fixtures" | Reproduce four audit findings before fixing them: derive test upgrades from the stamped build, retain timeout notices from their creation time, keep tracking installs across engine restarts, and correlate updater results with each request. Preserve the original management wire layouts, repeat lost results, and carry swap failures back to the original requester. Add deterministic regressions and mutation checks for stale packets, request identity, premature success and lost results. |
+| "Prepare experimental MAT capture driver and continuity probe" | Diagnose VB-CABLE's PCM-only capture path; prepare a pinned SysVAD virtual HDMI endpoint and bounded administrator-only raw MAT capture interface. Test byte fidelity, overflow, DMA gaps, protected audio, ownership and reader continuity. Validate the unsigned package and prepare a local test signature after the owner authorizes a controlled test. Include endpoint diagnostics and default-output snapshot/restore. No driver installed; native Atmos activation, transport, receiver playback and synchronization remain unverified. |
 
 ## Open items and known limitations
 
@@ -542,6 +551,7 @@ the commit by its summary line (find it with `git log --grep`).
 - **macOS self-update is unverified** (compile-checked only): `ditto`, `codesign --verify`, the bundle swap
   and `open -n` relaunch. Check it on the MacBook with the first release that has the updater.
 - **Not implemented:**
+  - Native Atmos capture/transport/playback. The current f32 PCM mixer and resampler cannot carry encoded MAT; the separate capture experiment has not been loaded. This PC was observed with Secure Boot and Memory Integrity enabled.
   - An optional inaudible keep-awake signal for TVs that mute after silence.
   - Per-stream volume and mute (in the original spec).
   - Replay protection for control messages.

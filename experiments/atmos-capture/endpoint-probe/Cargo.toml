@@ -1,0 +1,13 @@
+[package]
+name = "soundsync-atmos-endpoint-probe"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+soundsync-audio = { path = "../../../crates/audio" }
+serde_json = "1"
+wasapi = "0.26"
+windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_System_Com"] }

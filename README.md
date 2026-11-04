@@ -143,6 +143,12 @@ To get audio into the cable, either set *CABLE Input* as the output of the apps 
 **Switch Windows default output to VB-CABLE while broadcasting**. SoundSync then restores your previous
 default output when broadcasting stops, when it quits and, after a crash, at its next start.
 
+**Dolby Atmos for Home Theater:** SoundSync's current capture and network path carries PCM, including
+7.1, but does not preserve Atmos object metadata or forward encoded Dolby MAT. Enabling Atmos on each
+output does not add that capability to VB-CABLE. A separate [experimental virtual capture driver](experiments/atmos-capture/README.md)
+has been prepared for development; it has no production signature, has not been loaded, and is not integrated with
+SoundSync playback. Native Atmos across receivers remains unverified.
+
 ## Install on macOS
 
 1. Download `SoundSync-macos-universal.zip` from the newest release on the *Releases* page, unzip it and

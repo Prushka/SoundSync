@@ -1,0 +1,244 @@
+diff --git a/audio/sysvad/EndpointsCommon/minwavertstream.cpp b/audio/sysvad/EndpointsCommon/minwavertstream.cpp
+index adea0c8..003bf0a 100644
+--- a/audio/sysvad/EndpointsCommon/minwavertstream.cpp
++++ b/audio/sysvad/EndpointsCommon/minwavertstream.cpp
+@@ -1,4 +1,5 @@
+ #include <sysvad.h>
++#include "ss-atmos-capture.h"
+ #include <limits.h>
+ #include <ks.h>
+ #include "simple.h"
+@@ -35,6 +36,7 @@ Return Value:
+ --*/
+ {
+     PAGED_CODE();
++    SsAtmosEnd(this);
+     if (NULL != m_pMiniport)
+     {
+         if (m_pAudioModules)
+@@ -439,6 +441,7 @@ Return Value:
+     if (NT_SUCCESS(ntStatus))
+     {
+         m_bUnregisterStream = TRUE;
++        if (!m_bCapture) SsAtmosBegin(this, m_pWfExt);
+     }
+ 
+     return ntStatus;
+@@ -1469,11 +1472,8 @@ VOID CMiniportWaveRTStream::UpdatePosition
+                                         0);
+         }
+ 
+-        if (!g_DoNotCreateDataFiles)
+-        {
+-            // Read from buffer and write to a file.
+-            ReadBytes(ByteDisplacement);
+-        }
++        // Capture the encoded driver stream even when SysVAD's disk writer is disabled.
++        ReadBytes(ByteDisplacement);
+     }
+     
+     // Increment the DMA position by the number of bytes displaced since the last
+@@ -1542,12 +1542,22 @@ ByteDisplacement - # of bytes to process.
+ {
+     ULONG bufferOffset = m_ullLinearPosition % m_ulDmaBufferSize;
+ 
++    // A stalled DMA clock must report lost bytes, never replay overwritten data as new audio.
++    if (ByteDisplacement > m_ulDmaBufferSize)
++    {
++        const ULONG lost = ByteDisplacement - m_ulDmaBufferSize;
++        SsAtmosGap(this, lost);
++        bufferOffset = (bufferOffset + lost) % m_ulDmaBufferSize;
++        ByteDisplacement = m_ulDmaBufferSize;
++    }
++
+     // Normally this will loop no more than once for a single wrap, but if
+     // many bytes have been displaced then this may loops many times.
+     while (ByteDisplacement > 0)
+     {
+         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
+-        m_SaveData.WriteData(m_pDmaBuffer + bufferOffset, runWrite);
++        SsAtmosWrite(this, m_pDmaBuffer + bufferOffset, runWrite);
++        if (!g_DoNotCreateDataFiles) m_SaveData.WriteData(m_pDmaBuffer + bufferOffset, runWrite);
+         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
+         ByteDisplacement -= runWrite;
+     }
+@@ -1583,6 +1593,9 @@ Return Value:
+ 
+     DPF_ENTER(("[CMiniportWaveRT::SetContentId]"));
+ 
++    // Close the capture gate before updating any other DRM state.
++    SsAtmosProtect(this, drmRights->CopyProtect != FALSE);
++
+     NTSTATUS    ntStatus;
+     ULONG       ulOldContentId = contentId;
+ 
+diff --git a/audio/sysvad/TabletAudioSample/hdmitopo.cpp b/audio/sysvad/TabletAudioSample/hdmitopo.cpp
+index d187f46..6b01ef7 100644
+--- a/audio/sysvad/TabletAudioSample/hdmitopo.cpp
++++ b/audio/sysvad/TabletAudioSample/hdmitopo.cpp
+@@ -314,7 +314,7 @@ Return Value:
+ 
+ //=============================================================================
+ 
+-#define SINK_DESC_STR L"SinkDescription Sample"
++#define SINK_DESC_STR L"SoundSync Atmos Probe"
+ 
+ NTSTATUS
+ CHdmiMiniportTopology::PropertyHandlerJackSinkInfo
+diff --git a/audio/sysvad/TabletAudioSample/hdmitoptable.h b/audio/sysvad/TabletAudioSample/hdmitoptable.h
+index c360d79..d572e4c 100644
+--- a/audio/sysvad/TabletAudioSample/hdmitoptable.h
++++ b/audio/sysvad/TabletAudioSample/hdmitoptable.h
+@@ -165,7 +165,7 @@ PCPIN_DESCRIPTOR HdmiTopoMiniportPins[] =
+ static
+ KSJACK_DESCRIPTION HdmiJackDesc =
+ {
+-    KSAUDIO_SPEAKER_STEREO,
++    KSAUDIO_SPEAKER_7POINT1_SURROUND,
+     0x0000,               // no color
+     eConnTypeOtherDigital,
+     eGeoLocHDMI,
+diff --git a/audio/sysvad/TabletAudioSample/hdmiwavtable.h b/audio/sysvad/TabletAudioSample/hdmiwavtable.h
+index bd0f923..e2cbfcf 100644
+--- a/audio/sysvad/TabletAudioSample/hdmiwavtable.h
++++ b/audio/sysvad/TabletAudioSample/hdmiwavtable.h
+@@ -24,13 +24,13 @@ Abstract:
+ //=============================================================================
+ 
+ 
+-#define HDMI_DEVICE_MAX_CHANNELS                 2       // Max Channels.
++#define HDMI_DEVICE_MAX_CHANNELS                 8       // Max Channels.
+ 
+-#define HDMI_HOST_MAX_CHANNELS                   2       // Max Channels.
++#define HDMI_HOST_MAX_CHANNELS                   8       // Max Channels.
+ #define HDMI_HOST_MIN_BITS_PER_SAMPLE            16      // Min Bits Per Sample
+ #define HDMI_HOST_MAX_BITS_PER_SAMPLE            16      // Max Bits Per Sample
+ #define HDMI_HOST_MIN_SAMPLE_RATE                44100   // Min Sample Rate
+-#define HDMI_HOST_MAX_SAMPLE_RATE                96000   // Max Sample Rate
++#define HDMI_HOST_MAX_SAMPLE_RATE                192000  // Max Sample Rate
+ 
+ #define HDMI_LOOPBACK_MAX_CHANNELS               HDMI_HOST_MAX_CHANNELS          // Must be equal to host pin's Max Channels.
+ #define HDMI_LOOPBACK_MIN_BITS_PER_SAMPLE        HDMI_HOST_MIN_BITS_PER_SAMPLE   // Must be equal to host pin's Min Bits Per Sample
+@@ -73,6 +73,29 @@ Abstract:
+ static 
+ KSDATAFORMAT_WAVEFORMATEXTENSIBLE HdmiHostPinSupportedDeviceFormats[] =
+ {
++    // SoundSync probe: shared-mode 7.1 mix plus the surround-mask variants
++    // requested by Windows' Dolby renderer. Encoded bytes are captured below WASAPI.
++    {
++        { sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE), 0, 0, 0,
++          STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO), STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
++          STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) },
++        { { WAVE_FORMAT_EXTENSIBLE, 8, 48000, 768000, 16, 16, sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) },
++          16, KSAUDIO_SPEAKER_7POINT1_SURROUND, STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM) }
++    },
++    {
++        { sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE), 0, 0, 0,
++          STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO), STATICGUIDOF(KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_MAT20),
++          STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) },
++        { { WAVE_FORMAT_EXTENSIBLE, 8, 192000, 3072000, 16, 16, sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) },
++          16, KSAUDIO_SPEAKER_7POINT1_SURROUND, STATICGUIDOF(KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_MAT20) }
++    },
++    {
++        { sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE), 0, 0, 0,
++          STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO), STATICGUIDOF(KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_MAT21),
++          STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) },
++        { { WAVE_FORMAT_EXTENSIBLE, 8, 192000, 3072000, 16, 16, sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) },
++          16, KSAUDIO_SPEAKER_7POINT1_SURROUND, STATICGUIDOF(KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_MAT21) }
++    },
+     { // 0
+         {
+             sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+diff --git a/audio/sysvad/TabletAudioSample/minipairs.h b/audio/sysvad/TabletAudioSample/minipairs.h
+index 0d00f5a..b55d2f3 100644
+--- a/audio/sysvad/TabletAudioSample/minipairs.h
++++ b/audio/sysvad/TabletAudioSample/minipairs.h
+@@ -509,10 +509,7 @@ ENDPOINT_MINIPAIR MicArray3Miniports =
+ static
+ PENDPOINT_MINIPAIR  g_RenderEndpoints[] = 
+ {
+-    &SpeakerMiniports,
+-    &SpeakerHpMiniports,
+     &HdmiMiniports,
+-    &SpdifMiniports,
+ };
+ 
+ #define g_cRenderEndpoints  (SIZEOF_ARRAY(g_RenderEndpoints))
+@@ -524,13 +521,10 @@ PENDPOINT_MINIPAIR  g_RenderEndpoints[] =
+ static
+ PENDPOINT_MINIPAIR  g_CaptureEndpoints[] = 
+ {
+-    &MicInMiniports,
+-    &MicArray1Miniports,
+-    &MicArray2Miniports,
+-    &MicArray3Miniports,
++    NULL,
+ };
+ 
+-#define g_cCaptureEndpoints (SIZEOF_ARRAY(g_CaptureEndpoints))
++#define g_cCaptureEndpoints 0
+ 
+ //=============================================================================
+ //
+diff --git a/audio/sysvad/adapter.cpp b/audio/sysvad/adapter.cpp
+index 0f44c59..db9d0dd 100644
+--- a/audio/sysvad/adapter.cpp
++++ b/audio/sysvad/adapter.cpp
+@@ -21,6 +21,7 @@ Abstract:
+ #define PUT_GUIDS_HERE
+ 
+ #include <sysvad.h>
++#include "ss-atmos-capture.h"
+ #include <ContosoKeywordDetector.h>
+ #include "IHVPrivatePropertySet.h"
+ 
+@@ -260,7 +261,7 @@ UNICODE_STRING g_RegistryPath;      // This is used to store the registry settin
+ // default. Use the registry value DisableBthScoBypass (DWORD) > 0 to override 
+ // this default.
+ //
+-DWORD g_DisableBthScoBypass = 0;   // default is SCO bypass enabled.
++DWORD g_DisableBthScoBypass = 1;   // Probe never claims unrelated Bluetooth devices.
+ #endif // SYSVAD_BTH_BYPASS
+ 
+ #ifdef SYSVAD_USB_SIDEBAND
+@@ -269,7 +270,7 @@ DWORD g_DisableBthScoBypass = 0;   // default is SCO bypass enabled.
+ // default. Use the registry value DisableUsbSideband (DWORD) > 0 to override 
+ // this default.
+ //
+-DWORD g_DisableUsbSideband = 0;   // default is USB bypass enabled.
++DWORD g_DisableUsbSideband = 1;   // Probe never claims unrelated USB devices.
+ #endif // SYSVAD_USB_SIDEBAND
+ 
+ #ifdef SYSVAD_A2DP_SIDEBAND
+@@ -278,7 +279,7 @@ DWORD g_DisableUsbSideband = 0;   // default is USB bypass enabled.
+ // default. Use the registry value DisableA2dpSideband (DWORD) > 0 to override 
+ // this default.
+ //
+-DWORD g_DisableA2dpSideband = 0; // default is A2DP bypass enabled.
++DWORD g_DisableA2dpSideband = 1; // Probe never claims unrelated Bluetooth devices.
+ #endif
+ 
+ //-----------------------------------------------------------------------------
+@@ -326,6 +327,8 @@ Environment:
+ 
+     DPF(D_TERSE, ("[DriverUnload]"));
+ 
++    SsAtmosDestroy();
++
+     ReleaseRegistryStringBuffer();
+ 
+     if (DriverObject == NULL)
+@@ -589,6 +592,13 @@ Return Value:
+     gPCDriverUnloadRoutine = DriverObject->DriverUnload;
+     DriverObject->DriverUnload = DriverUnload;
+ 
++    ntStatus = SsAtmosInitialize(DriverObject);
++    if (!NT_SUCCESS(ntStatus))
++    {
++        if (gPCDriverUnloadRoutine != NULL) gPCDriverUnloadRoutine(DriverObject);
++        goto Done;
++    }
++
+     //
+     // All done.
+     //

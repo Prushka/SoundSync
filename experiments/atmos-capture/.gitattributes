@@ -1,0 +1,2 @@
+# A unified patch must retain the upstream source's context whitespace.
+sysvad.patch whitespace=-blank-at-eol
