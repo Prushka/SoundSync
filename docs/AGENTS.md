@@ -428,6 +428,11 @@ otherwise.
 - **Leave the machine as found:**
   - Don't change Windows default devices or other settings, and don't touch the firewall.
   - Don't install drivers or software.
+  - **Atmos requirement (2026-11-03):** capture must work with every Windows app,
+    including games. Preserve Secure Boot, BIOS settings, driver-signing enforcement
+    and Memory Integrity. Do not load the test-signed Atmos prototype on this PC;
+    the later restriction supersedes earlier controlled-driver-test authorization.
+    Player-specific integration alone is not an acceptable substitute for system-wide capture.
   - Ask before anything audible. The owner has allowed microphone calibration runs and volume measurements,
     provided every volume changed is restored. Restore everything and delete test-instance folders
     (`%APPDATA%\SoundSync-*`, `%LOCALAPPDATA%\SoundSync-*`) afterwards.
@@ -539,6 +544,7 @@ the commit by its summary line (find it with `git log --grep`).
 | "Update other devices from the Overview group" | Add individual and bulk remote updates to the latest release, with builds, progress and errors in Group. Use independently versioned, authenticated management messages on the existing UDP socket so future audio protocol mismatches remain remotely repairable. Require one local update for legacy installations. Verify cross-protocol requests, group authentication, session/request deduplication, timeouts, restart build confirmation and the existing download checks; inspect the controls with silent loopback fixtures. |
 | "Fix remote update retries, restart tracking and CI build fixtures" | Reproduce four audit findings before fixing them: derive test upgrades from the stamped build, retain timeout notices from their creation time, keep tracking installs across engine restarts, and correlate updater results with each request. Preserve the original management wire layouts, repeat lost results, and carry swap failures back to the original requester. Add deterministic regressions and mutation checks for stale packets, request identity, premature success and lost results. |
 | "Prepare experimental MAT capture driver and continuity probe" | Diagnose VB-CABLE's PCM-only capture path; prepare a pinned SysVAD virtual HDMI endpoint and bounded administrator-only raw MAT capture interface. Test byte fidelity, overflow, DMA gaps, protected audio, ownership and reader continuity. Validate the unsigned package and prepare a local test signature after the owner authorizes a controlled test. Include endpoint diagnostics and default-output snapshot/restore. No driver installed; native Atmos activation, transport, receiver playback and synchronization remain unverified. |
+| "Record system-wide Atmos scope and unchanged security requirement" | Preserve the owner's later requirement for every Windows app with no BIOS or security-policy changes. Exclude the test-signed prototype from deployment on this PC. Record completed read-only preflight, user-confirmed clean LG height playback and restored audio settings; native Atmos capture and distribution remain unresolved. |
 
 ## Open items and known limitations
 
@@ -551,7 +557,7 @@ the commit by its summary line (find it with `git log --grep`).
 - **macOS self-update is unverified** (compile-checked only): `ditto`, `codesign --verify`, the bundle swap
   and `open -n` relaunch. Check it on the MacBook with the first release that has the updater.
 - **Not implemented:**
-  - Native Atmos capture/transport/playback. The current f32 PCM mixer and resampler cannot carry encoded MAT; the separate capture experiment has not been loaded. This PC was observed with Secure Boot and Memory Integrity enabled.
+  - Native Atmos capture/transport/playback. The current f32 PCM mixer and resampler cannot carry encoded MAT; the separate capture experiment has not been loaded and cannot be deployed on this PC under the owner's unchanged-security requirement. Local LG height playback through the existing spatial audio stack was confirmed; system-wide native Atmos capture still needs a suitable signed driver or independently verified hardware solution.
   - An optional inaudible keep-awake signal for TVs that mute after silence.
   - Per-stream volume and mute (in the original spec).
   - Replay protection for control messages.

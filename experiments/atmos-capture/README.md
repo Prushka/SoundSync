@@ -5,6 +5,14 @@ It has not been loaded or tested with Dolby Access. SoundSync still transports
 PCM and cannot forward the captured stream to receivers. Do not install this as
 a replacement for VB-CABLE on the assumption that multi-room Atmos now works.
 
+**Current owner constraint (2026-11-03):** Atmos capture must work system-wide,
+including games, with Secure Boot and all BIOS settings unchanged. Do not load
+this test-signed prototype on the owner's PC or weaken driver-signing or memory
+integrity protection to make it load. Earlier controlled-test authorization does
+not override this later restriction. Source/player integration alone does not
+meet the requested scope. Further host deployment requires a tested driver
+accepted by normal Windows signing policy; none has been verified for this task.
+
 The immediate experiment is to establish whether Windows' installed Dolby
 renderer will send intact MAT to a virtual HDMI endpoint on this machine. Only
 after that succeeds can native transport and actual receiver decoding be tested.
@@ -98,7 +106,7 @@ Windows error 2; no live capture test was performed.
   SysVAD's sample WASAPI loopback remains a generated test tone: **do not use
   this endpoint as SoundSync's existing loopback input**.
 
-## Preparing the authorized controlled test
+## Preparing a research test package
 
 After reviewing the unsigned package, create a local test-signed copy with:
 
@@ -119,12 +127,23 @@ modes save and restore all three Windows output roles, using SoundSync's existin
 policy implementation. Snapshot refuses to overwrite a file; restore checks all
 saved endpoints before changing any role and skips roles already correct.
 
-The owner authorized a controlled test on this PC on 2026-11-03. A local
-test-signed package and default-output snapshot were prepared. Administrator
-preflight and the live driver test are still pending; no certificate has been
-trusted and no driver or boot policy installed/changed.
+The owner initially authorized a controlled test on this PC on 2026-11-03. A local
+test-signed package and default-output snapshot were prepared. The read-only
+administrator preflight completed: Secure Boot and Memory Integrity are enabled,
+and Windows test-signing mode is off. No certificate has been trusted and no
+driver or boot policy installed/changed. The later requirement to preserve BIOS
+and Windows security settings excludes loading this prototype on the owner's PC.
 
-## First live test
+After a report of intermittent white noise, the owner confirmed clean sustained
+playback on the existing LG output with Dolby Atmos for home theater enabled.
+A separate generated 7.1.4 PCM test used Windows Spatial Audio with 12 static
+objects; the owner heard clean audio when only the four height positions played.
+All five active outputs' original mute/volume settings were restored, and all
+three default-output roles remained unchanged. The noise's cause was not
+identified. This validates local height playback, not native Atmos capture,
+preserved moving-object metadata, network distribution or receiver synchronization.
+
+## First live test in a suitable development environment
 
 Installation and test-boot/signing changes require separate approval under
 `docs/AGENTS.md` ("Don't install drivers or software"). A development driver can
@@ -133,7 +152,8 @@ package is unsigned and normal Windows driver enforcement will reject it.
 Do not silently disable Secure Boot, memory integrity, BitLocker protection or
 driver signature enforcement to make it load. No such setting has been changed.
 
-Once a test environment and installation are explicitly authorized, the test is:
+These research steps do not authorize installation on the owner's current PC.
+Once a separate test environment and installation are explicitly authorized, the test is:
 
 1. Install only this package, with the required test signing handled explicitly.
    Keep ordinary Windows default outputs and the existing SoundSync route unchanged.
